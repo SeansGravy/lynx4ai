@@ -291,6 +291,90 @@ Open the Cline sidebar in VS Code, click the MCP Servers icon, select "Configure
 | Amazon Q | `~/.aws/amazonq/mcp.json` | `q mcp add --name lynx4ai --command ...` |
 | Cline | VS Code globalStorage | — |
 
+## Usage
+
+Once lynx4ai is set up as an MCP server, just talk to your AI in plain English. The AI figures out which tools to call. Here are some things you can say:
+
+### Basic browsing
+
+```
+Go to https://news.ycombinator.com and tell me the top 5 stories
+```
+
+```
+Navigate to wikipedia.org, search for "Lynx browser", and summarize the article
+```
+
+```
+Open https://weather.com and tell me the forecast for Cincinnati
+```
+
+### Reading authenticated sites
+
+```
+Open MyChart and pull my latest lab results
+```
+
+```
+Log into my bank and show me last month's transactions
+```
+
+```
+Check my Jira dashboard and list all tickets assigned to me
+```
+
+> For authenticated sites: the first time, use `headless: false` so Chrome opens visibly and you can log in (or handle MFA). Your session persists in the Chrome profile — next time it's already logged in.
+
+### Multi-LLM
+
+```
+Go to chat.openai.com, ask ChatGPT "explain quantum tunneling in one paragraph",
+then go to gemini.google.com and ask Gemini the same thing. Compare their answers.
+```
+
+```
+Open Claude's web UI and ask it to write a Python script, then open ChatGPT
+and ask it to review that script.
+```
+
+### Data extraction
+
+```
+Go to zillow.com, search for houses in Austin TX under $400k, and make me
+a spreadsheet with address, price, sqft, and bedrooms for the first 10 results
+```
+
+```
+Navigate to my company's internal wiki and find all pages mentioning "deployment runbook"
+```
+
+### Form automation
+
+```
+Go to the DMV appointment site and fill out the renewal form with my info
+```
+
+### Step-by-step (for control freaks)
+
+You can also be explicit about which tools to use:
+
+```
+1. Create a browser instance with headless=false so I can see it
+2. Navigate to https://example.com
+3. Take a snapshot with filter=interactive
+4. Click on element e3
+5. Type "hello world" into element e7
+6. Take a screenshot
+```
+
+### Tips
+
+- **Headless vs headed** — Headless (default) is faster and invisible. Use `headless: false` when you need to see what's happening or handle manual login steps.
+- **Compact snapshots** — Ask for `format=compact` to save tokens. Ask for `filter=interactive` to only see clickable/typeable elements.
+- **Persistent profiles** — Name your profile (e.g., `profile: "gmail"`) to keep sessions separate. Cookies persist across restarts.
+- **Diff mode** — After the first snapshot, use `diff=true` to only see what changed — great for monitoring or waiting for page updates.
+- **Screenshot when confused** — If the AI is having trouble navigating, ask it to take a screenshot so you can see what it sees.
+
 ## MCP Tools
 
 ### Instance Management
