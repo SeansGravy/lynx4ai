@@ -1,0 +1,53 @@
+[package]
+name = "lynx4ai"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sean Gray <sean@rhmc.io>"]
+license = "MIT"
+description = "Rust MCP server for AI browser automation via Chrome DevTools Protocol"
+repository = "https://github.com/SeansGravy/lynx4ai"
+keywords = ["mcp", "browser", "automation", "ai", "cdp"]
+categories = ["development-tools", "web-programming"]
+
+[[bin]]
+name = "lynx4ai"
+path = "src/main.rs"
+
+[lib]
+name = "lynx4ai"
+path = "src/lib.rs"
+
+[dependencies]
+# MCP framework
+rmcp = { version = "0.17", features = ["server", "transport-io"] }
+schemars = "1.0"
+
+# Chrome DevTools Protocol
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+futures-util = "0.3"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Encoding
+base64 = "0.22"
+
+# Logging (MUST go to stderr, never stdout)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"
