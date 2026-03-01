@@ -82,6 +82,7 @@ impl BrowserInstance {
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-blink-features=AutomationControlled")
+            .arg("--force-renderer-accessibility")
             .window_size(1280, 900);
 
         if headless {
