@@ -32,26 +32,67 @@ Same idea, different era. Text was enough then. Structure is enough now.
 - **Persistent Chrome profiles** — stay logged in across sessions
 - **Single binary** — no runtime dependencies, just needs Chrome installed
 
-## Quick Start
+## Install
+
+### One-liner (macOS / Linux)
 
 ```bash
-# Build
-cargo build --release
-
-# The binary communicates via stdio (MCP JSON-RPC protocol)
-# Configure your AI tool to use it as an MCP server
+curl -fsSL https://raw.githubusercontent.com/SeansGravy/lynx4ai/main/install.sh | bash
 ```
 
-### Claude Code / Claude Desktop
+This will:
+- Detect your platform (macOS Intel/Apple Silicon, Linux x86_64/ARM)
+- Check for Chrome
+- Build from source (installs Rust if needed)
+- Install to `~/.local/bin/lynx4ai`
+- Print setup instructions for your AI tool
 
-Add to your MCP settings:
+### From source (manual)
+
+```bash
+git clone https://github.com/SeansGravy/lynx4ai.git
+cd lynx4ai
+make install
+# or: cargo build --release && cp target/release/lynx4ai ~/.local/bin/
+```
+
+### Requirements
+
+- **Chrome or Chromium** — the only runtime dependency
+- **Rust 1.75+** — for building from source
+- **1Password CLI** (`op`) — optional, for `auth_login` tool
+
+## Setup
+
+### Claude Code
+
+```bash
+claude mcp add lynx4ai ~/.local/bin/lynx4ai
+```
+
+### Claude Desktop
+
+Add to `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "lynx4ai": {
-      "command": "/path/to/lynx4ai",
-      "args": []
+      "command": "~/.local/bin/lynx4ai"
+    }
+  }
+}
+```
+
+### Cursor / Windsurf / Codex
+
+Add to `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "lynx4ai": {
+      "command": "~/.local/bin/lynx4ai"
     }
   }
 }
@@ -59,7 +100,7 @@ Add to your MCP settings:
 
 ### Other AI Tools
 
-lynx4ai works with any MCP-compatible tool: Claude Code, Codex, Cursor, Windsurf, Copilot, Gemini CLI, Grok, and more. Just point the tool's MCP config at the binary.
+lynx4ai works with any MCP-compatible tool. Just point the tool's MCP server config at the binary path.
 
 ## MCP Tools
 
