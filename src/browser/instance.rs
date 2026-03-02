@@ -13,9 +13,10 @@ use crate::error::LynxError;
 use crate::snapshot;
 use crate::types::{InstanceId, InstanceInfo};
 
-/// Maps element refs (e0, e1...) to backend DOM node IDs
+/// Maps element refs (e0, e1...) to backend DOM node IDs.
+/// Ref indices are assigned by the JS snapshot walker (data-lynx-ref stamps)
+/// and inserted here for validation. Actions use querySelector, not BackendNodeId.
 pub struct RefMap {
-    counter: usize,
     ref_to_node: HashMap<String, chromiumoxide::cdp::browser_protocol::dom::BackendNodeId>,
 }
 
@@ -28,24 +29,17 @@ impl Default for RefMap {
 impl RefMap {
     pub fn new() -> Self {
         Self {
-            counter: 0,
             ref_to_node: HashMap::new(),
         }
     }
 
-    pub fn reset(&mut self) {
-        self.counter = 0;
-        self.ref_to_node.clear();
-    }
-
-    pub fn assign(
+    /// Insert a ref_id assigned by the JS snapshot walker.
+    pub fn insert(
         &mut self,
+        ref_id: String,
         node_id: chromiumoxide::cdp::browser_protocol::dom::BackendNodeId,
-    ) -> String {
-        let ref_id = format!("e{}", self.counter);
-        self.counter += 1;
-        self.ref_to_node.insert(ref_id.clone(), node_id);
-        ref_id
+    ) {
+        self.ref_to_node.insert(ref_id, node_id);
     }
 
     pub fn resolve(
