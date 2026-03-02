@@ -76,6 +76,15 @@ impl BrowserInstance {
             LynxError::Browser(format!("Failed to create profile dir: {e}"))
         })?;
 
+        // Clean up stale lock files from unclean Chrome exits
+        for lock_file in &["SingletonLock", "SingletonCookie", "SingletonSocket"] {
+            let lock_path = profile_dir.join(lock_file);
+            if lock_path.exists() {
+                tracing::info!("Removing stale {lock_file} from profile '{profile}'");
+                let _ = std::fs::remove_file(&lock_path);
+            }
+        }
+
         let mut builder = BrowserConfig::builder()
             .chrome_executable(&config.chrome_path)
             .user_data_dir(&profile_dir)
