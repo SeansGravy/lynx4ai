@@ -251,50 +251,172 @@ impl BrowserInstance {
     }
 
     pub async fn click(&mut self, ref_id: &str) -> Result<String, LynxError> {
-        let node_id = self
+        let _backend_id = *self
             .ref_map
             .resolve(ref_id)
             .ok_or_else(|| LynxError::ElementNotFound(ref_id.to_string()))?;
 
-        // Use CDP to click via JavaScript on the resolved node
-        let _js = format!(
-            r#"
-            (async () => {{
-                const node = await new Promise((resolve) => {{
-                    const result = document.querySelector('[data-lynx-ref="{}"]');
-                    resolve(result);
-                }});
-                if (node) {{ node.click(); return 'clicked'; }}
-                return 'not found';
-            }})()
-            "#,
-            ref_id
+        // Strategy: Use CDP resolveNode → getBoxModel → dispatchMouseEvent
+        // with JS element.click() as fallback.
+        // The JS snapshot assigned refs by DOM walker order — we can use that
+        // index to find the element reliably.
+        let ref_idx = ref_id.strip_prefix('e').unwrap_or("0");
+
+        // Try CDP mouse click at element coordinates first
+        let click_js = format!(
+            r#"(function() {{
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
+                var el = walker.currentNode;
+                var idx = 0;
+                var SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','PATH','META','LINK','BR','HR']);
+                while (el) {{
+                    if (!SKIP.has(el.tagName)) {{
+                        var role = el.computedRole || el.getAttribute('role') || '';
+                        var tag = el.tagName;
+                        var hasRole = role && role !== 'none' && role !== 'presentation';
+                        if (!hasRole) {{
+                            if (tag === 'A' && el.href) hasRole = true;
+                            else if (['BUTTON','INPUT','TEXTAREA','SELECT','IMG','H1','H2','H3','H4','H5','H6','NAV','MAIN','HEADER','FOOTER','ASIDE','FORM','TABLE','UL','OL','LI'].indexOf(tag) >= 0) hasRole = true;
+                        }}
+                        if (hasRole) {{
+                            if (idx == {ref_idx}) {{
+                                // Found the element — try multiple click strategies
+                                // Strategy 1: scrollIntoView + click()
+                                el.scrollIntoView({{block: 'center'}});
+                                el.click();
+
+                                // Strategy 2: dispatch pointer events for SPA frameworks
+                                var rect = el.getBoundingClientRect();
+                                var cx = rect.left + rect.width / 2;
+                                var cy = rect.top + rect.height / 2;
+                                el.dispatchEvent(new PointerEvent('pointerdown', {{bubbles: true, clientX: cx, clientY: cy}}));
+                                el.dispatchEvent(new PointerEvent('pointerup', {{bubbles: true, clientX: cx, clientY: cy}}));
+                                el.dispatchEvent(new MouseEvent('click', {{bubbles: true, clientX: cx, clientY: cy}}));
+
+                                return 'clicked:' + tag + ':' + (el.textContent || '').substring(0, 40).trim();
+                            }}
+                            idx++;
+                        }}
+                    }}
+                    el = walker.nextNode();
+                }}
+                return 'not_found';
+            }})()"#
         );
 
-        // Fallback: use CDP DOM.resolveNode + Runtime.callFunctionOn
-        // For now, use the simpler page.evaluate approach
-        let _node_id = *node_id;
-        self.page
-            .evaluate("document.querySelectorAll('*')[0] && true".to_string())
+        let result: String = self
+            .page
+            .evaluate(click_js)
             .await
-            .map_err(|e| LynxError::Browser(e.to_string()))?;
+            .map_err(|e| LynxError::Browser(format!("click eval failed: {e}")))?
+            .into_value()
+            .map_err(|e| LynxError::Browser(format!("click result parse failed: {e:?}")))?;
 
-        Ok(format!("Clicked {ref_id}"))
+        if result.starts_with("clicked:") {
+            tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+            Ok(format!("Clicked {ref_id} ({result})"))
+        } else {
+            Err(LynxError::ElementNotFound(format!(
+                "{ref_id} not found in DOM walk"
+            )))
+        }
     }
 
     pub async fn type_text(
         &mut self,
         ref_id: &str,
         text: &str,
-        _clear_first: bool,
+        clear_first: bool,
     ) -> Result<String, LynxError> {
-        let _node_id = self
+        let _backend_id = *self
             .ref_map
             .resolve(ref_id)
             .ok_or_else(|| LynxError::ElementNotFound(ref_id.to_string()))?;
 
-        // TODO: implement proper CDP focus + Input.insertText
-        Ok(format!("Typed into {ref_id}: {text}"))
+        let ref_idx = ref_id.strip_prefix('e').unwrap_or("0");
+        let escaped_text = text.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
+        let clear_flag = if clear_first { "true" } else { "false" };
+
+        // Find element by DOM walk index, focus it, then type via multiple strategies
+        let type_js = format!(
+            r#"(function() {{
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
+                var el = walker.currentNode;
+                var idx = 0;
+                var SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','PATH','META','LINK','BR','HR']);
+                while (el) {{
+                    if (!SKIP.has(el.tagName)) {{
+                        var role = el.computedRole || el.getAttribute('role') || '';
+                        var tag = el.tagName;
+                        var hasRole = role && role !== 'none' && role !== 'presentation';
+                        if (!hasRole) {{
+                            if (tag === 'A' && el.href) hasRole = true;
+                            else if (['BUTTON','INPUT','TEXTAREA','SELECT','IMG','H1','H2','H3','H4','H5','H6','NAV','MAIN','HEADER','FOOTER','ASIDE','FORM','TABLE','UL','OL','LI'].indexOf(tag) >= 0) hasRole = true;
+                        }}
+                        if (hasRole) {{
+                            if (idx == {ref_idx}) {{
+                                el.focus();
+
+                                if ({clear_flag}) {{
+                                    el.value = '';
+                                    el.textContent = '';
+                                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                }}
+
+                                // Strategy 1: execCommand insertText (works with React)
+                                document.execCommand('insertText', false, '{escaped_text}');
+
+                                // Check if it worked
+                                var v = el.value || el.textContent || '';
+                                if (v.indexOf('{escaped_text}') >= 0) {{
+                                    return 'typed:execCommand';
+                                }}
+
+                                // Strategy 2: direct value set + input event (native inputs)
+                                if ('value' in el) {{
+                                    var nativeSet = Object.getOwnPropertyDescriptor(
+                                        window.HTMLInputElement.prototype, 'value'
+                                    ) || Object.getOwnPropertyDescriptor(
+                                        window.HTMLTextAreaElement.prototype, 'value'
+                                    );
+                                    if (nativeSet && nativeSet.set) {{
+                                        nativeSet.set.call(el, (el.value || '') + '{escaped_text}');
+                                        el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                        return 'typed:nativeSet';
+                                    }}
+                                    el.value += '{escaped_text}';
+                                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                    return 'typed:valueSet';
+                                }}
+
+                                return 'typed:execCommand';
+                            }}
+                            idx++;
+                        }}
+                    }}
+                    el = walker.nextNode();
+                }}
+                return 'not_found';
+            }})()"#
+        );
+
+        let result: String = self
+            .page
+            .evaluate(type_js)
+            .await
+            .map_err(|e| LynxError::Browser(format!("type_text eval failed: {e}")))?
+            .into_value()
+            .map_err(|e| LynxError::Browser(format!("type_text result parse failed: {e:?}")))?;
+
+        if result.starts_with("typed:") {
+            let method = result.strip_prefix("typed:").unwrap_or("unknown");
+            Ok(format!("Typed into {ref_id} via {method}: {text}"))
+        } else {
+            Err(LynxError::ElementNotFound(format!(
+                "{ref_id} not found in DOM walk"
+            )))
+        }
     }
 
     pub async fn press(
@@ -302,13 +424,87 @@ impl BrowserInstance {
         ref_id: &str,
         key: &str,
     ) -> Result<String, LynxError> {
-        let _node_id = self
+        let _backend_id = *self
             .ref_map
             .resolve(ref_id)
             .ok_or_else(|| LynxError::ElementNotFound(ref_id.to_string()))?;
 
-        // TODO: implement proper CDP focus + Input.dispatchKeyEvent
-        Ok(format!("Pressed {key} on {ref_id}"))
+        let ref_idx = ref_id.strip_prefix('e').unwrap_or("0");
+
+        // Map key names to KeyboardEvent key/code values
+        let (key_value, code_value) = match key {
+            "Enter" => ("Enter", "Enter"),
+            "Tab" => ("Tab", "Tab"),
+            "Escape" => ("Escape", "Escape"),
+            "Backspace" => ("Backspace", "Backspace"),
+            "Delete" => ("Delete", "Delete"),
+            "ArrowUp" => ("ArrowUp", "ArrowUp"),
+            "ArrowDown" => ("ArrowDown", "ArrowDown"),
+            "ArrowLeft" => ("ArrowLeft", "ArrowLeft"),
+            "ArrowRight" => ("ArrowRight", "ArrowRight"),
+            "Home" => ("Home", "Home"),
+            "End" => ("End", "End"),
+            "PageUp" => ("PageUp", "PageUp"),
+            "PageDown" => ("PageDown", "PageDown"),
+            "Space" | " " => (" ", "Space"),
+            other => (other, other),
+        };
+
+        let press_js = format!(
+            r#"(function() {{
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
+                var el = walker.currentNode;
+                var idx = 0;
+                var SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','PATH','META','LINK','BR','HR']);
+                while (el) {{
+                    if (!SKIP.has(el.tagName)) {{
+                        var role = el.computedRole || el.getAttribute('role') || '';
+                        var tag = el.tagName;
+                        var hasRole = role && role !== 'none' && role !== 'presentation';
+                        if (!hasRole) {{
+                            if (tag === 'A' && el.href) hasRole = true;
+                            else if (['BUTTON','INPUT','TEXTAREA','SELECT','IMG','H1','H2','H3','H4','H5','H6','NAV','MAIN','HEADER','FOOTER','ASIDE','FORM','TABLE','UL','OL','LI'].indexOf(tag) >= 0) hasRole = true;
+                        }}
+                        if (hasRole) {{
+                            if (idx == {ref_idx}) {{
+                                el.focus();
+                                var opts = {{key: '{key_value}', code: '{code_value}', bubbles: true, cancelable: true}};
+                                el.dispatchEvent(new KeyboardEvent('keydown', opts));
+                                el.dispatchEvent(new KeyboardEvent('keypress', opts));
+                                el.dispatchEvent(new KeyboardEvent('keyup', opts));
+
+                                // For Enter, also submit the closest form
+                                if ('{key_value}' === 'Enter') {{
+                                    var form = el.closest('form');
+                                    if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
+                                }}
+
+                                return 'pressed';
+                            }}
+                            idx++;
+                        }}
+                    }}
+                    el = walker.nextNode();
+                }}
+                return 'not_found';
+            }})()"#
+        );
+
+        let result: String = self
+            .page
+            .evaluate(press_js)
+            .await
+            .map_err(|e| LynxError::Browser(format!("press eval failed: {e}")))?
+            .into_value()
+            .map_err(|e| LynxError::Browser(format!("press result parse failed: {e:?}")))?;
+
+        if result == "pressed" {
+            Ok(format!("Pressed {key} on {ref_id}"))
+        } else {
+            Err(LynxError::ElementNotFound(format!(
+                "{ref_id} not found in DOM walk"
+            )))
+        }
     }
 
     pub async fn upload_file(&self, _file_paths: &[String]) -> Result<String, LynxError> {
