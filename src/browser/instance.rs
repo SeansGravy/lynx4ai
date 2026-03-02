@@ -292,47 +292,25 @@ impl BrowserInstance {
             .resolve(ref_id)
             .ok_or_else(|| LynxError::ElementNotFound(ref_id.to_string()))?;
 
-        let ref_idx = ref_id.strip_prefix('e').unwrap_or("0");
-
-        // Step 1: Find element via DOM walk, scroll into view, return center coordinates
+        // Find element by data-lynx-ref attribute (stamped during snapshot)
         let locate_js = format!(
             r#"(function() {{
-                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
-                var el = walker.currentNode;
-                var idx = 0;
-                var SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','PATH','META','LINK','BR','HR']);
-                while (el) {{
-                    if (!SKIP.has(el.tagName)) {{
-                        var role = el.computedRole || el.getAttribute('role') || '';
-                        var tag = el.tagName;
-                        var hasRole = role && role !== 'none' && role !== 'presentation';
-                        if (!hasRole) {{
-                            if (tag === 'A' && el.href) hasRole = true;
-                            else if (['BUTTON','INPUT','TEXTAREA','SELECT','IMG','H1','H2','H3','H4','H5','H6','NAV','MAIN','HEADER','FOOTER','ASIDE','FORM','TABLE','UL','OL','LI'].indexOf(tag) >= 0) hasRole = true;
-                        }}
-                        if (hasRole) {{
-                            if (idx == {ref_idx}) {{
-                                // Walk up to nearest interactive ancestor
-                                var target = el;
-                                var btn = el.closest('button, a, [role="button"], [role="link"], [role="menuitem"]');
-                                if (btn && btn !== el && btn.contains(el)) {{
-                                    target = btn;
-                                }}
-                                target.scrollIntoView({{block: 'center'}});
-                                var rect = target.getBoundingClientRect();
-                                return JSON.stringify({{
-                                    x: rect.left + rect.width / 2,
-                                    y: rect.top + rect.height / 2,
-                                    tag: target.tagName,
-                                    text: (target.textContent || '').substring(0, 40).trim()
-                                }});
-                            }}
-                            idx++;
-                        }}
-                    }}
-                    el = walker.nextNode();
+                var el = document.querySelector('[data-lynx-ref="{ref_id}"]');
+                if (!el) return 'not_found';
+                // Walk up to nearest interactive ancestor if this is an inner element
+                var target = el;
+                var btn = el.closest('button, a, [role="button"], [role="link"], [role="menuitem"]');
+                if (btn && btn !== el && btn.contains(el)) {{
+                    target = btn;
                 }}
-                return 'not_found';
+                target.scrollIntoView({{block: 'center'}});
+                var rect = target.getBoundingClientRect();
+                return JSON.stringify({{
+                    x: rect.left + rect.width / 2,
+                    y: rect.top + rect.height / 2,
+                    tag: target.tagName,
+                    text: (target.textContent || '').substring(0, 40).trim()
+                }});
             }})()"#
         );
 
@@ -397,88 +375,69 @@ impl BrowserInstance {
             .resolve(ref_id)
             .ok_or_else(|| LynxError::ElementNotFound(ref_id.to_string()))?;
 
-        let ref_idx = ref_id.strip_prefix('e').unwrap_or("0");
         let escaped_text = text.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
         let clear_flag = if clear_first { "true" } else { "false" };
 
-        // Single async eval: find element, focus, delay, then insert text
-        // MUST be one eval — splitting into two loses focus between calls
+        // Find element by data-lynx-ref (stamped during snapshot), focus, type
+        // Single async eval so focus isn't lost between calls
         let type_js = format!(
             r#"(async function() {{
-                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
-                var el = walker.currentNode;
-                var idx = 0;
-                var SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','PATH','META','LINK','BR','HR']);
-                while (el) {{
-                    if (!SKIP.has(el.tagName)) {{
-                        var role = el.computedRole || el.getAttribute('role') || '';
-                        var tag = el.tagName;
-                        var hasRole = role && role !== 'none' && role !== 'presentation';
-                        if (!hasRole) {{
-                            if (tag === 'A' && el.href) hasRole = true;
-                            else if (['BUTTON','INPUT','TEXTAREA','SELECT','IMG','H1','H2','H3','H4','H5','H6','NAV','MAIN','HEADER','FOOTER','ASIDE','FORM','TABLE','UL','OL','LI'].indexOf(tag) >= 0) hasRole = true;
-                        }}
-                        if (hasRole) {{
-                            if (idx == {ref_idx}) {{
-                                el.scrollIntoView({{block: 'center'}});
-                                el.focus();
-                                el.click();
+                var el = document.querySelector('[data-lynx-ref="{ref_id}"]');
+                if (!el) return 'not_found';
+                var tag = el.tagName;
 
-                                if ({clear_flag}) {{
-                                    if (tag === 'INPUT' || tag === 'TEXTAREA') {{
-                                        el.select();
-                                    }} else {{
-                                        var sel = window.getSelection();
-                                        var range = document.createRange();
-                                        range.selectNodeContents(el);
-                                        sel.removeAllRanges();
-                                        sel.addRange(range);
-                                    }}
-                                    document.execCommand('delete', false);
-                                }}
+                el.scrollIntoView({{block: 'center'}});
+                el.focus();
+                el.click();
 
-                                // Yield to let React/framework process focus event
-                                await new Promise(function(r) {{ setTimeout(r, 50); }});
-
-                                // Strategy 1: execCommand insertText (React-compatible)
-                                var ok = document.execCommand('insertText', false, '{escaped_text}');
-                                var v = el.value || el.textContent || '';
-                                if (ok && v.indexOf('{escaped_text}') >= 0) {{
-                                    return 'typed:execCommand';
-                                }}
-
-                                // Strategy 2: nativeInputValueSetter (React onChange trigger)
-                                if (tag === 'INPUT' || tag === 'TEXTAREA') {{
-                                    var proto = tag === 'INPUT'
-                                        ? window.HTMLInputElement.prototype
-                                        : window.HTMLTextAreaElement.prototype;
-                                    var nativeSet = Object.getOwnPropertyDescriptor(proto, 'value');
-                                    if (nativeSet && nativeSet.set) {{
-                                        nativeSet.set.call(el, '{escaped_text}');
-                                        el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                                        el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                                        return 'typed:nativeSet';
-                                    }}
-                                    el.value = '{escaped_text}';
-                                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                                    return 'typed:valueSet';
-                                }}
-
-                                // Strategy 3: textContent for contenteditable
-                                if (el.isContentEditable) {{
-                                    el.textContent = '{escaped_text}';
-                                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                                    return 'typed:textContent';
-                                }}
-
-                                return 'typed:execCommand';
-                            }}
-                            idx++;
-                        }}
+                if ({clear_flag}) {{
+                    if (tag === 'INPUT' || tag === 'TEXTAREA') {{
+                        el.select();
+                    }} else {{
+                        var sel = window.getSelection();
+                        var range = document.createRange();
+                        range.selectNodeContents(el);
+                        sel.removeAllRanges();
+                        sel.addRange(range);
                     }}
-                    el = walker.nextNode();
+                    document.execCommand('delete', false);
                 }}
-                return 'not_found';
+
+                // Yield to let React/framework process focus event
+                await new Promise(function(r) {{ setTimeout(r, 50); }});
+
+                // Strategy 1: execCommand insertText (React-compatible)
+                var ok = document.execCommand('insertText', false, '{escaped_text}');
+                var v = el.value || el.textContent || '';
+                if (ok && v.indexOf('{escaped_text}') >= 0) {{
+                    return 'typed:execCommand';
+                }}
+
+                // Strategy 2: nativeInputValueSetter (React onChange trigger)
+                if (tag === 'INPUT' || tag === 'TEXTAREA') {{
+                    var proto = tag === 'INPUT'
+                        ? window.HTMLInputElement.prototype
+                        : window.HTMLTextAreaElement.prototype;
+                    var nativeSet = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (nativeSet && nativeSet.set) {{
+                        nativeSet.set.call(el, '{escaped_text}');
+                        el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                        return 'typed:nativeSet';
+                    }}
+                    el.value = '{escaped_text}';
+                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                    return 'typed:valueSet';
+                }}
+
+                // Strategy 3: textContent for contenteditable
+                if (el.isContentEditable) {{
+                    el.textContent = '{escaped_text}';
+                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                    return 'typed:textContent';
+                }}
+
+                return 'typed:execCommand';
             }})()"#
         );
 
@@ -511,8 +470,6 @@ impl BrowserInstance {
             .resolve(ref_id)
             .ok_or_else(|| LynxError::ElementNotFound(ref_id.to_string()))?;
 
-        let ref_idx = ref_id.strip_prefix('e').unwrap_or("0");
-
         // Map key names to KeyboardEvent key/code values
         let (key_value, code_value) = match key {
             "Enter" => ("Enter", "Enter"),
@@ -532,43 +489,24 @@ impl BrowserInstance {
             other => (other, other),
         };
 
+        // Find element by data-lynx-ref (stamped during snapshot)
         let press_js = format!(
             r#"(function() {{
-                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
-                var el = walker.currentNode;
-                var idx = 0;
-                var SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','PATH','META','LINK','BR','HR']);
-                while (el) {{
-                    if (!SKIP.has(el.tagName)) {{
-                        var role = el.computedRole || el.getAttribute('role') || '';
-                        var tag = el.tagName;
-                        var hasRole = role && role !== 'none' && role !== 'presentation';
-                        if (!hasRole) {{
-                            if (tag === 'A' && el.href) hasRole = true;
-                            else if (['BUTTON','INPUT','TEXTAREA','SELECT','IMG','H1','H2','H3','H4','H5','H6','NAV','MAIN','HEADER','FOOTER','ASIDE','FORM','TABLE','UL','OL','LI'].indexOf(tag) >= 0) hasRole = true;
-                        }}
-                        if (hasRole) {{
-                            if (idx == {ref_idx}) {{
-                                el.focus();
-                                var opts = {{key: '{key_value}', code: '{code_value}', bubbles: true, cancelable: true}};
-                                el.dispatchEvent(new KeyboardEvent('keydown', opts));
-                                el.dispatchEvent(new KeyboardEvent('keypress', opts));
-                                el.dispatchEvent(new KeyboardEvent('keyup', opts));
+                var el = document.querySelector('[data-lynx-ref="{ref_id}"]');
+                if (!el) return 'not_found';
+                el.focus();
+                var opts = {{key: '{key_value}', code: '{code_value}', bubbles: true, cancelable: true}};
+                el.dispatchEvent(new KeyboardEvent('keydown', opts));
+                el.dispatchEvent(new KeyboardEvent('keypress', opts));
+                el.dispatchEvent(new KeyboardEvent('keyup', opts));
 
-                                // For Enter, also submit the closest form
-                                if ('{key_value}' === 'Enter') {{
-                                    var form = el.closest('form');
-                                    if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
-                                }}
-
-                                return 'pressed';
-                            }}
-                            idx++;
-                        }}
-                    }}
-                    el = walker.nextNode();
+                // For Enter, also submit the closest form
+                if ('{key_value}' === 'Enter') {{
+                    var form = el.closest('form');
+                    if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
                 }}
-                return 'not_found';
+
+                return 'pressed';
             }})()"#
         );
 

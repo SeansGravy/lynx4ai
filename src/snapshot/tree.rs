@@ -112,7 +112,13 @@ const JS_SNAPSHOT: &str = r#"
         return text.trim().substring(0, 100);
     }
 
+    // Clean up any previous ref tags
+    document.querySelectorAll('[data-lynx-ref]').forEach(function(e) {
+        e.removeAttribute('data-lynx-ref');
+    });
+
     const nodes = [];
+    let refIdx = 0;
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
     let el = walker.currentNode;
     while (el) {
@@ -123,6 +129,9 @@ const JS_SNAPSHOT: &str = r#"
                 const interactive = INTERACTIVE_TAGS.has(el.tagName) || INTERACTIVE_ROLES.has(role);
                 const value = el.value !== undefined && el.value !== '' ? String(el.value) : undefined;
                 const desc = el.getAttribute('aria-description') || undefined;
+                // Stamp the DOM element so click/type_text can find it by ref
+                el.setAttribute('data-lynx-ref', 'e' + refIdx);
+                refIdx++;
                 nodes.push({ role, name, interactive, value, desc, tag: el.tagName });
             }
         }
@@ -132,21 +141,87 @@ const JS_SNAPSHOT: &str = r#"
 })()
 "#;
 
+/// JavaScript to stamp DOM elements with data-lynx-ref attributes.
+/// Must use identical role-detection logic as JS_SNAPSHOT.
+/// Used after CDP snapshots so click/type_text can find elements by ref.
+const JS_TAG_ELEMENTS: &str = r#"
+(function() {
+    const INTERACTIVE_TAGS = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','DETAILS','SUMMARY']);
+    const SKIP_TAGS = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','PATH','META','LINK','BR','HR']);
+
+    function getRole(el) {
+        if (el.computedRole && el.computedRole !== 'generic' && el.computedRole !== 'none') {
+            return el.computedRole;
+        }
+        const ariaRole = el.getAttribute('role');
+        if (ariaRole && ariaRole !== 'none' && ariaRole !== 'presentation') return ariaRole;
+        const tag = el.tagName;
+        if (tag === 'A' && el.href) return 'link';
+        if (tag === 'BUTTON') return 'button';
+        if (tag === 'INPUT') {
+            const t = (el.type || 'text').toLowerCase();
+            if (t === 'checkbox') return 'checkbox';
+            if (t === 'radio') return 'radio';
+            if (t === 'submit' || t === 'button') return 'button';
+            if (t === 'search') return 'searchbox';
+            return 'textbox';
+        }
+        if (tag === 'TEXTAREA') return 'textbox';
+        if (tag === 'SELECT') return 'combobox';
+        if (tag === 'IMG') return 'img';
+        if (tag === 'H1' || tag === 'H2' || tag === 'H3' || tag === 'H4' || tag === 'H5' || tag === 'H6') return 'heading';
+        if (tag === 'NAV') return 'navigation';
+        if (tag === 'MAIN') return 'main';
+        if (tag === 'HEADER') return 'banner';
+        if (tag === 'FOOTER') return 'contentinfo';
+        if (tag === 'ASIDE') return 'complementary';
+        if (tag === 'FORM') return 'form';
+        if (tag === 'TABLE') return 'table';
+        if (tag === 'UL' || tag === 'OL') return 'list';
+        if (tag === 'LI') return 'listitem';
+        return '';
+    }
+
+    document.querySelectorAll('[data-lynx-ref]').forEach(function(e) {
+        e.removeAttribute('data-lynx-ref');
+    });
+
+    let refIdx = 0;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
+    let el = walker.currentNode;
+    while (el) {
+        if (!SKIP_TAGS.has(el.tagName)) {
+            if (getRole(el)) {
+                el.setAttribute('data-lynx-ref', 'e' + refIdx);
+                refIdx++;
+            }
+        }
+        el = walker.nextNode();
+    }
+    return refIdx;
+})()
+"#;
+
 /// Build a snapshot of the page's accessibility tree.
 /// Tries CDP Accessibility.getFullAXTree first, falls back to JS-based DOM walk.
+/// Always stamps DOM elements with data-lynx-ref for click/type resolution.
 pub async fn build_snapshot(
     page: &Page,
     interactive_only: bool,
 ) -> Result<(Vec<SnapshotNode>, RefMap), LynxError> {
     // Try CDP accessibility tree first
     match build_snapshot_cdp(page, interactive_only).await {
-        Ok(result) => return Ok(result),
+        Ok(result) => {
+            // CDP path doesn't stamp DOM elements — run the tagger
+            let _ = page.evaluate(JS_TAG_ELEMENTS).await;
+            return Ok(result);
+        }
         Err(e) => {
             tracing::warn!("CDP getFullAXTree failed ({e}), falling back to JS snapshot");
         }
     }
 
-    // Fallback: JS-based DOM walk with computedRole/computedName
+    // Fallback: JS-based DOM walk (stamps elements during walk)
     build_snapshot_js(page, interactive_only).await
 }
 
