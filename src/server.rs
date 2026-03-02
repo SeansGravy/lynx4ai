@@ -217,7 +217,7 @@ impl LynxServer {
 
     #[tool(description = "Extract readable text from the page (~800 tokens by default).")]
     async fn text(&self, Parameters(p): Parameters<TextParams>) -> String {
-        let mgr = self.manager.read().await;
+        let mut mgr = self.manager.write().await;
         match mgr.text(&p.instance_id, p.max_tokens.unwrap_or(800) as usize).await {
             Ok(text) => text,
             Err(e) => format!("Error: {e}"),
@@ -254,7 +254,7 @@ impl LynxServer {
     #[tool(description = "Upload file(s) via a file input element on the page. Comma-separate multiple paths.")]
     async fn upload_file(&self, Parameters(p): Parameters<UploadFileParams>) -> String {
         let paths: Vec<String> = p.file_paths.split(',').map(|s| s.trim().to_string()).collect();
-        let mgr = self.manager.read().await;
+        let mut mgr = self.manager.write().await;
         match mgr.upload_file(&p.instance_id, &paths).await {
             Ok(msg) => msg,
             Err(e) => format!("Error: {e}"),
@@ -263,7 +263,7 @@ impl LynxServer {
 
     #[tool(description = "Execute JavaScript in the page context and return the result as JSON.")]
     async fn eval(&self, Parameters(p): Parameters<EvalParams>) -> String {
-        let mgr = self.manager.read().await;
+        let mut mgr = self.manager.write().await;
         match mgr.eval(&p.instance_id, &p.expression).await {
             Ok(result) => result,
             Err(e) => format!("Error: {e}"),
@@ -272,7 +272,7 @@ impl LynxServer {
 
     #[tool(description = "Dismiss cookie banners, modals, and popups blocking page interaction.")]
     async fn dismiss_overlays(&self, Parameters(p): Parameters<InstanceIdParam>) -> String {
-        let mgr = self.manager.read().await;
+        let mut mgr = self.manager.write().await;
         match mgr.dismiss_overlays(&p.instance_id).await {
             Ok(msg) => msg,
             Err(e) => format!("Error: {e}"),
@@ -281,7 +281,7 @@ impl LynxServer {
 
     #[tool(description = "Wait until page content stabilizes (text stops changing, no loading spinners).")]
     async fn wait_for_stable(&self, Parameters(p): Parameters<WaitForStableParams>) -> String {
-        let mgr = self.manager.read().await;
+        let mut mgr = self.manager.write().await;
         match mgr.wait_for_stable(&p.instance_id, p.timeout_ms.unwrap_or(10000)).await {
             Ok(msg) => msg,
             Err(e) => format!("Error: {e}"),
@@ -290,7 +290,7 @@ impl LynxServer {
 
     #[tool(description = "Take a page screenshot. Returns base64-encoded PNG.")]
     async fn screenshot(&self, Parameters(p): Parameters<ScreenshotParams>) -> String {
-        let mgr = self.manager.read().await;
+        let mut mgr = self.manager.write().await;
         match mgr.screenshot(&p.instance_id, p.full_page.unwrap_or(false)).await {
             Ok(b64) => format!("data:image/png;base64,{b64}"),
             Err(e) => format!("Error: {e}"),
@@ -299,7 +299,7 @@ impl LynxServer {
 
     #[tool(description = "Export the current page as PDF. Returns base64-encoded PDF.")]
     async fn pdf(&self, Parameters(p): Parameters<InstanceIdParam>) -> String {
-        let mgr = self.manager.read().await;
+        let mut mgr = self.manager.write().await;
         match mgr.pdf(&p.instance_id).await {
             Ok(b64) => format!("data:application/pdf;base64,{b64}"),
             Err(e) => format!("Error: {e}"),

@@ -62,7 +62,7 @@ pub struct BrowserInstance {
     pub last_snapshot: Option<Vec<crate::types::SnapshotNode>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub headless: bool,
-    _handler: JoinHandle<()>,
+    handler: JoinHandle<()>,
 }
 
 impl BrowserInstance {
@@ -120,8 +120,14 @@ impl BrowserInstance {
             last_snapshot: None,
             created_at: chrono::Utc::now(),
             headless,
-            _handler: handler_task,
+            handler: handler_task,
         })
+    }
+
+    /// Check if the browser instance is still alive.
+    /// Returns false if the CDP handler has finished (Chrome disconnected/crashed).
+    pub fn is_alive(&self) -> bool {
+        !self.handler.is_finished()
     }
 
     pub fn info(&self) -> InstanceInfo {
@@ -131,6 +137,20 @@ impl BrowserInstance {
             url: String::new(), // URL fetched async separately
             created_at: self.created_at.to_rfc3339(),
             headless: self.headless,
+            status: if self.is_alive() { "alive".to_string() } else { "dead".to_string() },
+        }
+    }
+
+    /// Ensure the instance is alive before performing operations.
+    /// Returns a clear error instead of cryptic "send failed because receiver is gone".
+    fn check_alive(&self) -> Result<(), LynxError> {
+        if self.is_alive() {
+            Ok(())
+        } else {
+            Err(LynxError::Browser(format!(
+                "Instance '{}' is dead (Chrome process exited). Destroy and recreate it.",
+                self.id
+            )))
         }
     }
 
@@ -153,6 +173,7 @@ impl BrowserInstance {
     }
 
     pub async fn navigate(&mut self, url: &str, wait_ms: u64) -> Result<String, LynxError> {
+        self.check_alive()?;
         self.page
             .goto(url)
             .await
@@ -178,6 +199,7 @@ impl BrowserInstance {
         _selector: Option<&str>,
         max_tokens: Option<usize>,
     ) -> Result<String, LynxError> {
+        self.check_alive()?;
         let interactive_only = filter == Some("interactive");
 
         let (nodes, ref_map) = snapshot::tree::build_snapshot(&self.page, interactive_only).await?;
@@ -234,6 +256,7 @@ impl BrowserInstance {
     }
 
     pub async fn text(&self, max_tokens: usize) -> Result<String, LynxError> {
+        self.check_alive()?;
         let text: String = self
             .page
             .evaluate("document.body.innerText")
@@ -251,6 +274,7 @@ impl BrowserInstance {
     }
 
     pub async fn click(&mut self, ref_id: &str) -> Result<String, LynxError> {
+        self.check_alive()?;
         let _backend_id = *self
             .ref_map
             .resolve(ref_id)
@@ -328,6 +352,7 @@ impl BrowserInstance {
         text: &str,
         clear_first: bool,
     ) -> Result<String, LynxError> {
+        self.check_alive()?;
         let _backend_id = *self
             .ref_map
             .resolve(ref_id)
@@ -424,6 +449,7 @@ impl BrowserInstance {
         ref_id: &str,
         key: &str,
     ) -> Result<String, LynxError> {
+        self.check_alive()?;
         let _backend_id = *self
             .ref_map
             .resolve(ref_id)
@@ -513,6 +539,7 @@ impl BrowserInstance {
     }
 
     pub async fn eval(&self, expression: &str) -> Result<String, LynxError> {
+        self.check_alive()?;
         let enabled = std::env::var("LYNX_EVAL_ENABLED")
             .map(|v| v != "false" && v != "0")
             .unwrap_or(true);
@@ -536,6 +563,7 @@ impl BrowserInstance {
     }
 
     pub async fn dismiss_overlays(&self) -> Result<String, LynxError> {
+        self.check_alive()?;
         let js = r#"
         (function() {
             const selectors = [
@@ -574,6 +602,7 @@ impl BrowserInstance {
     }
 
     pub async fn wait_for_stable(&self, timeout_ms: u64) -> Result<String, LynxError> {
+        self.check_alive()?;
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_millis(timeout_ms);
         let mut last_text = String::new();
@@ -608,6 +637,7 @@ impl BrowserInstance {
     }
 
     pub async fn screenshot(&self, full_page: bool) -> Result<String, LynxError> {
+        self.check_alive()?;
         let params = chromiumoxide::page::ScreenshotParams::builder()
             .format(chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Png)
             .full_page(full_page)
@@ -624,6 +654,7 @@ impl BrowserInstance {
     }
 
     pub async fn pdf(&self) -> Result<String, LynxError> {
+        self.check_alive()?;
         let params = chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams::default();
         let bytes = self
             .page

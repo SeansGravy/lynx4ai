@@ -12,6 +12,13 @@ pub struct BrowserManager {
     config: config::LynxConfig,
 }
 
+/// Result of checking if an instance is alive, with enough info to recover
+struct DeadInstanceInfo {
+    id: InstanceId,
+    profile: String,
+    headless: bool,
+}
+
 impl Default for BrowserManager {
     fn default() -> Self {
         Self::new()
@@ -23,6 +30,48 @@ impl BrowserManager {
         Self {
             instances: HashMap::new(),
             config: config::LynxConfig::from_env(),
+        }
+    }
+
+    /// Check if the resolved instance is dead and return its info for recovery
+    fn check_dead(&self, id: &Option<String>) -> Option<DeadInstanceInfo> {
+        let inst = match id {
+            Some(id) => self.instances.get(id),
+            None => self.instances.values().next(),
+        };
+        match inst {
+            Some(inst) if !inst.is_alive() => Some(DeadInstanceInfo {
+                id: inst.id.clone(),
+                profile: inst.profile.clone(),
+                headless: inst.headless,
+            }),
+            _ => None,
+        }
+    }
+
+    /// If the target instance is dead, relaunch it with the same profile.
+    /// Returns Ok(true) if recovery happened, Ok(false) if instance was fine.
+    async fn recover_if_dead(&mut self, id: &Option<String>) -> Result<bool, LynxError> {
+        if let Some(dead) = self.check_dead(id) {
+            tracing::warn!(
+                "Instance '{}' is dead — auto-recovering with profile '{}'",
+                dead.id, dead.profile
+            );
+            // Remove the dead instance
+            self.instances.remove(&dead.id);
+            // Relaunch with same profile and headless setting
+            let new_inst = instance::BrowserInstance::launch(
+                &self.config,
+                &dead.profile,
+                dead.headless,
+            ).await?;
+            // Keep the same ID so callers don't need to update references
+            let mut recovered = new_inst;
+            recovered.id = dead.id.clone();
+            self.instances.insert(dead.id, recovered);
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
@@ -88,6 +137,7 @@ impl BrowserManager {
         _block_images: bool,
         wait_ms: u64,
     ) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance_mut(id)?;
         inst.navigate(url, wait_ms).await
     }
@@ -101,17 +151,20 @@ impl BrowserManager {
         selector: Option<&str>,
         max_tokens: Option<usize>,
     ) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance_mut(id)?;
         inst.snapshot(filter, diff, format, selector, max_tokens)
             .await
     }
 
-    pub async fn text(&self, id: &Option<String>, max_tokens: usize) -> Result<String, LynxError> {
+    pub async fn text(&mut self, id: &Option<String>, max_tokens: usize) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance(id)?;
         inst.text(max_tokens).await
     }
 
     pub async fn click(&mut self, id: &Option<String>, ref_id: &str) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance_mut(id)?;
         inst.click(ref_id).await
     }
@@ -123,6 +176,7 @@ impl BrowserManager {
         text: &str,
         clear_first: bool,
     ) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance_mut(id)?;
         inst.type_text(ref_id, text, clear_first).await
     }
@@ -133,52 +187,59 @@ impl BrowserManager {
         ref_id: &str,
         key: &str,
     ) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance_mut(id)?;
         inst.press(ref_id, key).await
     }
 
     pub async fn upload_file(
-        &self,
+        &mut self,
         id: &Option<String>,
         file_paths: &[String],
     ) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance(id)?;
         inst.upload_file(file_paths).await
     }
 
     pub async fn eval(
-        &self,
+        &mut self,
         id: &Option<String>,
         expression: &str,
     ) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance(id)?;
         inst.eval(expression).await
     }
 
-    pub async fn dismiss_overlays(&self, id: &Option<String>) -> Result<String, LynxError> {
+    pub async fn dismiss_overlays(&mut self, id: &Option<String>) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance(id)?;
         inst.dismiss_overlays().await
     }
 
     pub async fn wait_for_stable(
-        &self,
+        &mut self,
         id: &Option<String>,
         timeout_ms: u64,
     ) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance(id)?;
         inst.wait_for_stable(timeout_ms).await
     }
 
     pub async fn screenshot(
-        &self,
+        &mut self,
         id: &Option<String>,
         full_page: bool,
     ) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance(id)?;
         inst.screenshot(full_page).await
     }
 
-    pub async fn pdf(&self, id: &Option<String>) -> Result<String, LynxError> {
+    pub async fn pdf(&mut self, id: &Option<String>) -> Result<String, LynxError> {
+        self.recover_if_dead(id).await?;
         let inst = self.get_instance(id)?;
         inst.pdf().await
     }

@@ -50,4 +50,6 @@ pub struct InstanceInfo {
     pub url: String,
     pub created_at: String,
     pub headless: bool,
+    /// "alive" or "dead" — dead means Chrome process exited
+    pub status: String,
 }
