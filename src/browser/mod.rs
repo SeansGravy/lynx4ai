@@ -125,7 +125,18 @@ impl BrowserManager {
 
     pub async fn destroy_instance(&mut self, id: &str) -> Result<(), LynxError> {
         match self.instances.remove(id) {
-            Some(_inst) => Ok(()),
+            Some(inst) => {
+                // Clean up SingletonLock files so the profile can be reused immediately
+                let profile_dir = self.config.profile_dir.join(&inst.profile);
+                for lock_file in &["SingletonLock", "SingletonCookie", "SingletonSocket"] {
+                    let lock_path = profile_dir.join(lock_file);
+                    if lock_path.exists() {
+                        tracing::info!("Cleaning {lock_file} from profile '{}'", inst.profile);
+                        let _ = std::fs::remove_file(&lock_path);
+                    }
+                }
+                Ok(())
+            }
             None => Err(LynxError::InstanceNotFound(id.to_string())),
         }
     }
