@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::input::{
+    DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+};
 use chromiumoxide::Page;
 use futures_util::StreamExt;
 use tokio::task::JoinHandle;
@@ -289,14 +292,10 @@ impl BrowserInstance {
             .resolve(ref_id)
             .ok_or_else(|| LynxError::ElementNotFound(ref_id.to_string()))?;
 
-        // Strategy: Use CDP resolveNode → getBoxModel → dispatchMouseEvent
-        // with JS element.click() as fallback.
-        // The JS snapshot assigned refs by DOM walker order — we can use that
-        // index to find the element reliably.
         let ref_idx = ref_id.strip_prefix('e').unwrap_or("0");
 
-        // Find element by DOM walk index, then click via multiple strategies
-        let click_js = format!(
+        // Step 1: Find element via DOM walk, scroll into view, return center coordinates
+        let locate_js = format!(
             r#"(function() {{
                 var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
                 var el = walker.currentNode;
@@ -313,32 +312,20 @@ impl BrowserInstance {
                         }}
                         if (hasRole) {{
                             if (idx == {ref_idx}) {{
-                                // Walk up to nearest clickable ancestor if this element
-                                // might be an inner icon/span inside a button/link
+                                // Walk up to nearest interactive ancestor
                                 var target = el;
                                 var btn = el.closest('button, a, [role="button"], [role="link"], [role="menuitem"]');
                                 if (btn && btn !== el && btn.contains(el)) {{
                                     target = btn;
                                 }}
-
                                 target.scrollIntoView({{block: 'center'}});
-
-                                // Strategy 1: native click
-                                target.click();
-
-                                // Strategy 2: full pointer event sequence at center coords
-                                // This is what real mouse clicks produce — needed for React/SPA
                                 var rect = target.getBoundingClientRect();
-                                var cx = rect.left + rect.width / 2;
-                                var cy = rect.top + rect.height / 2;
-                                var evOpts = {{bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window}};
-                                target.dispatchEvent(new PointerEvent('pointerdown', evOpts));
-                                target.dispatchEvent(new MouseEvent('mousedown', evOpts));
-                                target.dispatchEvent(new PointerEvent('pointerup', evOpts));
-                                target.dispatchEvent(new MouseEvent('mouseup', evOpts));
-                                target.dispatchEvent(new MouseEvent('click', evOpts));
-
-                                return 'clicked:' + target.tagName + ':' + (target.textContent || '').substring(0, 40).trim();
+                                return JSON.stringify({{
+                                    x: rect.left + rect.width / 2,
+                                    y: rect.top + rect.height / 2,
+                                    tag: target.tagName,
+                                    text: (target.textContent || '').substring(0, 40).trim()
+                                }});
                             }}
                             idx++;
                         }}
@@ -349,22 +336,53 @@ impl BrowserInstance {
             }})()"#
         );
 
-        let result: String = self
+        let locate_result: String = self
             .page
-            .evaluate(click_js)
+            .evaluate(locate_js)
             .await
-            .map_err(|e| LynxError::Browser(format!("click eval failed: {e}")))?
+            .map_err(|e| LynxError::Browser(format!("click locate failed: {e}")))?
             .into_value()
-            .map_err(|e| LynxError::Browser(format!("click result parse failed: {e:?}")))?;
+            .map_err(|e| LynxError::Browser(format!("click locate parse failed: {e:?}")))?;
 
-        if result.starts_with("clicked:") {
-            tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-            Ok(format!("Clicked {ref_id} ({result})"))
-        } else {
-            Err(LynxError::ElementNotFound(format!(
+        if locate_result == "not_found" {
+            return Err(LynxError::ElementNotFound(format!(
                 "{ref_id} not found in DOM walk"
-            )))
+            )));
         }
+
+        let coords: serde_json::Value = serde_json::from_str(&locate_result)
+            .map_err(|e| LynxError::Browser(format!("click coords parse failed: {e}")))?;
+        let x = coords["x"].as_f64().unwrap_or(0.0);
+        let y = coords["y"].as_f64().unwrap_or(0.0);
+        let tag = coords["tag"].as_str().unwrap_or("?");
+        let text = coords["text"].as_str().unwrap_or("");
+
+        // Step 2: CDP trusted mouse click at element center
+        // This produces isTrusted:true events that React/Angular respect
+        let mut mouse_down = DispatchMouseEventParams::new(
+            DispatchMouseEventType::MousePressed, x, y,
+        );
+        mouse_down.button = Some(MouseButton::Left);
+        mouse_down.click_count = Some(1);
+
+        self.page
+            .execute(mouse_down)
+            .await
+            .map_err(|e| LynxError::Browser(format!("click mousedown failed: {e}")))?;
+
+        let mut mouse_up = DispatchMouseEventParams::new(
+            DispatchMouseEventType::MouseReleased, x, y,
+        );
+        mouse_up.button = Some(MouseButton::Left);
+        mouse_up.click_count = Some(1);
+
+        self.page
+            .execute(mouse_up)
+            .await
+            .map_err(|e| LynxError::Browser(format!("click mouseup failed: {e}")))?;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        Ok(format!("Clicked {ref_id} (clicked:{tag}:{text})"))
     }
 
     pub async fn type_text(
@@ -383,9 +401,10 @@ impl BrowserInstance {
         let escaped_text = text.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
         let clear_flag = if clear_first { "true" } else { "false" };
 
-        // Step 1: Focus the element (separate eval so browser processes it)
-        let focus_js = format!(
-            r#"(function() {{
+        // Single async eval: find element, focus, delay, then insert text
+        // MUST be one eval — splitting into two loses focus between calls
+        let type_js = format!(
+            r#"(async function() {{
                 var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
                 var el = walker.currentNode;
                 var idx = 0;
@@ -406,12 +425,9 @@ impl BrowserInstance {
                                 el.click();
 
                                 if ({clear_flag}) {{
-                                    // Universal clear: selectAll + delete via execCommand
-                                    // Works on input, textarea, AND contenteditable
-                                    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
+                                    if (tag === 'INPUT' || tag === 'TEXTAREA') {{
                                         el.select();
                                     }} else {{
-                                        // contenteditable: use Selection API
                                         var sel = window.getSelection();
                                         var range = document.createRange();
                                         range.selectNodeContents(el);
@@ -420,7 +436,42 @@ impl BrowserInstance {
                                     }}
                                     document.execCommand('delete', false);
                                 }}
-                                return 'focused:' + tag;
+
+                                // Yield to let React/framework process focus event
+                                await new Promise(function(r) {{ setTimeout(r, 50); }});
+
+                                // Strategy 1: execCommand insertText (React-compatible)
+                                var ok = document.execCommand('insertText', false, '{escaped_text}');
+                                var v = el.value || el.textContent || '';
+                                if (ok && v.indexOf('{escaped_text}') >= 0) {{
+                                    return 'typed:execCommand';
+                                }}
+
+                                // Strategy 2: nativeInputValueSetter (React onChange trigger)
+                                if (tag === 'INPUT' || tag === 'TEXTAREA') {{
+                                    var proto = tag === 'INPUT'
+                                        ? window.HTMLInputElement.prototype
+                                        : window.HTMLTextAreaElement.prototype;
+                                    var nativeSet = Object.getOwnPropertyDescriptor(proto, 'value');
+                                    if (nativeSet && nativeSet.set) {{
+                                        nativeSet.set.call(el, '{escaped_text}');
+                                        el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                        return 'typed:nativeSet';
+                                    }}
+                                    el.value = '{escaped_text}';
+                                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                    return 'typed:valueSet';
+                                }}
+
+                                // Strategy 3: textContent for contenteditable
+                                if (el.isContentEditable) {{
+                                    el.textContent = '{escaped_text}';
+                                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                    return 'typed:textContent';
+                                }}
+
+                                return 'typed:execCommand';
                             }}
                             idx++;
                         }}
@@ -431,66 +482,19 @@ impl BrowserInstance {
             }})()"#
         );
 
-        let focus_result: String = self
+        let result: String = self
             .page
-            .evaluate(focus_js)
+            .evaluate(type_js)
             .await
-            .map_err(|e| LynxError::Browser(format!("type_text focus failed: {e}")))?
+            .map_err(|e| LynxError::Browser(format!("type_text failed: {e}")))?
             .into_value()
-            .map_err(|e| LynxError::Browser(format!("type_text focus parse failed: {e:?}")))?;
+            .map_err(|e| LynxError::Browser(format!("type_text parse failed: {e:?}")))?;
 
-        if !focus_result.starts_with("focused:") {
+        if result == "not_found" {
             return Err(LynxError::ElementNotFound(format!(
                 "{ref_id} not found in DOM walk"
             )));
         }
-
-        // Step 2: Small delay to let framework process focus event
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        // Step 3: Insert text via execCommand (separate eval for reliability)
-        let insert_js = format!(
-            r#"(function() {{
-                var ok = document.execCommand('insertText', false, '{escaped_text}');
-                if (ok) return 'typed:execCommand';
-
-                // Fallback: find the focused element and set value directly
-                var el = document.activeElement;
-                if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{
-                    var nativeSet = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value'
-                    ) || Object.getOwnPropertyDescriptor(
-                        window.HTMLTextAreaElement.prototype, 'value'
-                    );
-                    if (nativeSet && nativeSet.set) {{
-                        nativeSet.set.call(el, '{escaped_text}');
-                        el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                        el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                        return 'typed:nativeSet';
-                    }}
-                    el.value = '{escaped_text}';
-                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                    return 'typed:valueSet';
-                }}
-
-                // Last resort: textContent for contenteditable
-                if (el && el.isContentEditable) {{
-                    el.textContent += '{escaped_text}';
-                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                    return 'typed:textContent';
-                }}
-
-                return 'typed:execCommand';
-            }})()"#
-        );
-
-        let result: String = self
-            .page
-            .evaluate(insert_js)
-            .await
-            .map_err(|e| LynxError::Browser(format!("type_text insert failed: {e}")))?
-            .into_value()
-            .map_err(|e| LynxError::Browser(format!("type_text insert parse failed: {e:?}")))?;
 
         let method = result.strip_prefix("typed:").unwrap_or("unknown");
         Ok(format!("Typed into {ref_id} via {method}: {text}"))
