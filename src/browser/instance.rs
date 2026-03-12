@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
+use chromiumoxide::Page;
 use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
 };
-use chromiumoxide::Page;
 use futures_util::StreamExt;
 use tokio::task::JoinHandle;
 
@@ -53,12 +54,15 @@ impl RefMap {
 pub struct BrowserInstance {
     pub id: InstanceId,
     pub profile: String,
+    #[allow(dead_code)]
     pub browser: Browser,
     pub page: Page,
     pub ref_map: RefMap,
     pub last_snapshot: Option<Vec<crate::types::SnapshotNode>>,
+    pub snapshot_version: u64,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub headless: bool,
+    pub block_images: bool,
     handler: JoinHandle<()>,
 }
 
@@ -67,11 +71,11 @@ impl BrowserInstance {
         config: &LynxConfig,
         profile: &str,
         headless: bool,
+        block_images: bool,
     ) -> Result<Self, LynxError> {
         let profile_dir = config.profile_dir.join(profile);
-        std::fs::create_dir_all(&profile_dir).map_err(|e| {
-            LynxError::Browser(format!("Failed to create profile dir: {e}"))
-        })?;
+        std::fs::create_dir_all(&profile_dir)
+            .map_err(|e| LynxError::Browser(format!("Failed to create profile dir: {e}")))?;
 
         // Clean up stale lock files from unclean Chrome exits
         for lock_file in &["SingletonLock", "SingletonCookie", "SingletonSocket"] {
@@ -88,13 +92,18 @@ impl BrowserInstance {
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-blink-features=AutomationControlled")
-            .arg("--force-renderer-accessibility")
-            .window_size(1280, 900);
+            .arg("--force-renderer-accessibility");
 
         if headless {
-            builder = builder.arg("--headless=new");
+            builder = builder.arg("--headless=new").window_size(1920, 1080);
         } else {
-            builder = builder.with_head();
+            // Use a large window_size — Chrome clamps to the available screen.
+            // 3840x2160 ensures the viewport fills any Mac display at native scaling.
+            builder = builder.with_head().window_size(3840, 2160);
+        }
+
+        if block_images {
+            builder = builder.arg("--blink-settings=imagesEnabled=false");
         }
 
         let browser_config = builder
@@ -106,14 +115,35 @@ impl BrowserInstance {
             .map_err(|e| LynxError::Browser(format!("Chrome launch failed: {e}")))?;
 
         // Spawn the CDP handler as a background task
-        let handler_task = tokio::spawn(async move {
-            while let Some(_event) = handler.next().await {}
-        });
+        let handler_task =
+            tokio::spawn(async move { while let Some(_event) = handler.next().await {} });
 
         let page = browser
             .new_page("about:blank")
             .await
             .map_err(|e| LynxError::Browser(format!("New page failed: {e}")))?;
+
+        // chromiumoxide defaults the CDP viewport to 800x600 regardless of window_size.
+        // Use Emulation.setDeviceMetricsOverride to make the viewport fill the window.
+        if !headless {
+            // Query actual screen dimensions (CSS logical pixels)
+            let screen_dims: String = page
+                .evaluate(r#"JSON.stringify({w: screen.availWidth, h: screen.availHeight})"#)
+                .await
+                .ok()
+                .and_then(|v| v.into_value().ok())
+                .unwrap_or_else(|| r#"{"w":1920,"h":1080}"#.to_string());
+
+            let v: serde_json::Value = serde_json::from_str(&screen_dims)
+                .unwrap_or(serde_json::json!({"w":1920,"h":1080}));
+            let w = v["w"].as_i64().unwrap_or(1920);
+            // Subtract ~80px for Chrome UI (tabs + address bar + info bar)
+            let h = v["h"].as_i64().unwrap_or(1080) - 80;
+
+            let _ = page
+                .execute(SetDeviceMetricsOverrideParams::new(w, h, 0, false))
+                .await;
+        }
 
         let id = uuid::Uuid::new_v4().to_string();
 
@@ -124,8 +154,10 @@ impl BrowserInstance {
             page,
             ref_map: RefMap::new(),
             last_snapshot: None,
+            snapshot_version: 0,
             created_at: chrono::Utc::now(),
             headless,
+            block_images,
             handler: handler_task,
         })
     }
@@ -143,7 +175,11 @@ impl BrowserInstance {
             url: String::new(), // URL fetched async separately
             created_at: self.created_at.to_rfc3339(),
             headless: self.headless,
-            status: if self.is_alive() { "alive".to_string() } else { "dead".to_string() },
+            status: if self.is_alive() {
+                "alive".to_string()
+            } else {
+                "dead".to_string()
+            },
         }
     }
 
@@ -161,12 +197,7 @@ impl BrowserInstance {
     }
 
     async fn current_url(&self) -> String {
-        self.page
-            .url()
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default()
+        self.page.url().await.ok().flatten().unwrap_or_default()
     }
 
     async fn current_title(&self) -> String {
@@ -194,7 +225,130 @@ impl BrowserInstance {
         let title = self.current_title().await;
         let current_url = self.current_url().await;
 
+        // Auto-detect if user intervention is needed (login forms, CAPTCHAs)
+        if let Some(reason) = self.detect_intervention_needed().await {
+            tracing::info!("Intervention needed on {current_url}: {reason}");
+            self.show_system_notification(&reason);
+            self.inject_intervention_banner(&reason).await;
+            return Ok(format!(
+                "Navigated to: {current_url}\nTitle: {title}\n⚠️ Intervention required: {reason}"
+            ));
+        }
+
         Ok(format!("Navigated to: {current_url}\nTitle: {title}"))
+    }
+
+    /// Detect if the current page requires user intervention (login, CAPTCHA, etc.)
+    async fn detect_intervention_needed(&self) -> Option<String> {
+        let js = r#"(function() {
+            var signals = [];
+
+            // Check for visible password input
+            var pwInputs = document.querySelectorAll('input[type="password"]');
+            for (var i = 0; i < pwInputs.length; i++) {
+                if (pwInputs[i].offsetParent !== null) {
+                    signals.push('password_field');
+                    break;
+                }
+            }
+
+            // Check for login-like username/email fields
+            var textInputs = document.querySelectorAll('input[type="text"], input[type="email"], input:not([type])');
+            for (var i = 0; i < textInputs.length; i++) {
+                var el = textInputs[i];
+                var name = ((el.name || '') + (el.id || '') + (el.placeholder || '') + (el.getAttribute('aria-label') || '')).toLowerCase();
+                if (/username|user.?name|email|login|sign.?in|account/i.test(name) && el.offsetParent !== null) {
+                    signals.push('login_field');
+                    break;
+                }
+            }
+
+            // Check for CAPTCHA
+            if (document.querySelector('.g-recaptcha, .h-captcha, iframe[src*="recaptcha"], iframe[src*="hcaptcha"], [class*="captcha" i], [id*="captcha" i]')) {
+                signals.push('captcha');
+            }
+
+            // Check for verification code / MFA prompts
+            var bodyText = (document.body.innerText || '').substring(0, 3000).toLowerCase();
+            if (/verification code|verify your identity|enter.{0,20}code|two.?factor|2fa|multi.?factor|mfa|one.?time.?pass|sent.{0,30}(text|sms|email|phone)/i.test(bodyText)) {
+                // Confirm there's an input for the code
+                var codeInputs = document.querySelectorAll('input[type="text"], input[type="tel"], input[type="number"], input:not([type])');
+                for (var i = 0; i < codeInputs.length; i++) {
+                    var ci = codeInputs[i];
+                    var ciName = ((ci.name || '') + (ci.id || '') + (ci.placeholder || '') + (ci.getAttribute('aria-label') || '')).toLowerCase();
+                    if (/code|token|otp|verify|pin/i.test(ciName) && ci.offsetParent !== null) {
+                        signals.push('verification_code');
+                        break;
+                    }
+                }
+                // Also flag if the page text strongly suggests verification even without a named input
+                if (!signals.includes('verification_code') && /enter.{0,10}(the |your )?(code|pin)/i.test(bodyText)) {
+                    signals.push('verification_code');
+                }
+            }
+
+            // Check page title/URL for login indicators
+            var titleUrl = (document.title + ' ' + location.href).toLowerCase();
+            if (/login|log.in|sign.in|signin|authenticate|verification/i.test(titleUrl)) {
+                signals.push('login_page');
+            }
+
+            if (signals.length === 0) return null;
+
+            // Build reason (most specific first)
+            if (signals.includes('captcha')) return 'CAPTCHA detected — please solve it manually.';
+            if (signals.includes('verification_code')) return 'Verification code required — please check your phone/email and enter the code.';
+            if (signals.includes('password_field') || (signals.includes('login_field') && signals.includes('login_page'))) {
+                return 'Login form detected — please sign in manually.';
+            }
+            if (signals.includes('login_page') && signals.includes('login_field')) {
+                return 'Login page detected — please sign in manually.';
+            }
+            return null;
+        })()"#;
+
+        let result: Option<String> = self
+            .page
+            .evaluate(js)
+            .await
+            .ok()
+            .and_then(|v| v.into_value().ok());
+
+        result
+    }
+
+    /// Fire a native macOS notification via osascript
+    fn show_system_notification(&self, message: &str) {
+        let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!(
+            r#"display notification "{escaped}" with title "Lynx MCP" subtitle "User Intervention Required" sound name "Ping""#
+        );
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .spawn();
+    }
+
+    /// Inject the bottom intervention banner (without polling — fire-and-forget)
+    async fn inject_intervention_banner(&self, message: &str) {
+        let escaped_msg = message.replace('\\', "\\\\").replace('\'', "\\'");
+        let inject_js = format!(
+            r#"(function() {{
+                var old = document.getElementById('__lynx_intervention');
+                if (old) old.remove();
+                var banner = document.createElement('div');
+                banner.id = '__lynx_intervention';
+                banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:999999;background:#e94560;color:white;padding:12px 20px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:15px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 -4px 12px rgba(0,0,0,0.3);';
+                banner.innerHTML = '<span>\u{{1f511}} <strong>User intervention required</strong> \u{{2014}} {escaped_msg}</span><button id="__lynx_dismiss" style="background:white;color:#e94560;border:none;padding:8px 20px;border-radius:6px;font-size:14px;cursor:pointer;font-weight:600;margin-left:16px;white-space:nowrap;">Done \u{{2713}}</button>';
+                document.body.appendChild(banner);
+                document.getElementById('__lynx_dismiss').addEventListener('click', function() {{
+                    banner.remove();
+                    window.__lynx_intervention_dismissed = true;
+                }});
+                window.__lynx_intervention_dismissed = false;
+            }})()"#
+        );
+        let _ = self.page.evaluate(inject_js).await;
     }
 
     pub async fn snapshot(
@@ -202,15 +356,17 @@ impl BrowserInstance {
         filter: Option<&str>,
         diff: bool,
         format: &str,
-        _selector: Option<&str>,
+        selector: Option<&str>,
         max_tokens: Option<usize>,
     ) -> Result<String, LynxError> {
         self.check_alive()?;
         let interactive_only = filter == Some("interactive");
 
-        let (nodes, ref_map) = snapshot::tree::build_snapshot(&self.page, interactive_only).await?;
+        let (nodes, ref_map, next_ref) =
+            snapshot::tree::build_snapshot(&self.page, interactive_only, selector).await?;
 
         self.ref_map = ref_map;
+        self.snapshot_version = next_ref;
 
         // Handle diff
         let diff_summary = if diff {
@@ -252,6 +408,7 @@ impl BrowserInstance {
                     total_refs: nodes.len(),
                     nodes,
                     diff_summary,
+                    snapshot_version: self.snapshot_version,
                 };
                 serde_json::to_string_pretty(&result)
                     .map_err(|e| LynxError::Snapshot(e.to_string()))?
@@ -281,11 +438,29 @@ impl BrowserInstance {
 
     pub async fn click(&mut self, ref_id: &str) -> Result<String, LynxError> {
         self.check_alive()?;
-        let _backend_id = *self
-            .ref_map
+        self.ref_map
             .resolve(ref_id)
             .ok_or_else(|| LynxError::ElementNotFound(ref_id.to_string()))?;
 
+        // First attempt
+        match self.click_inner(ref_id).await {
+            Ok(msg) => return Ok(msg),
+            Err(LynxError::ElementNotFound(_)) => {
+                tracing::info!("click {ref_id} missed — dismissing overlays and retrying");
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Dismiss overlays that may be blocking the element
+        let _ = self.dismiss_overlays().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+        // Retry once
+        self.click_inner(ref_id).await
+    }
+
+    /// Single click attempt — locate element by ref, CDP mouse click at center.
+    async fn click_inner(&self, ref_id: &str) -> Result<String, LynxError> {
         // Find element by data-lynx-ref attribute (stamped during snapshot)
         let locate_js = format!(
             r#"(function() {{
@@ -318,7 +493,7 @@ impl BrowserInstance {
 
         if locate_result == "not_found" {
             return Err(LynxError::ElementNotFound(format!(
-                "{ref_id} not found in DOM walk"
+                "{ref_id} not found in DOM"
             )));
         }
 
@@ -329,11 +504,10 @@ impl BrowserInstance {
         let tag = coords["tag"].as_str().unwrap_or("?");
         let text = coords["text"].as_str().unwrap_or("");
 
-        // Step 2: CDP trusted mouse click at element center
-        // This produces isTrusted:true events that React/Angular respect
-        let mut mouse_down = DispatchMouseEventParams::new(
-            DispatchMouseEventType::MousePressed, x, y,
-        );
+        // CDP trusted mouse click at element center
+        // Produces isTrusted:true events that React/Angular respect
+        let mut mouse_down =
+            DispatchMouseEventParams::new(DispatchMouseEventType::MousePressed, x, y);
         mouse_down.button = Some(MouseButton::Left);
         mouse_down.click_count = Some(1);
 
@@ -342,9 +516,8 @@ impl BrowserInstance {
             .await
             .map_err(|e| LynxError::Browser(format!("click mousedown failed: {e}")))?;
 
-        let mut mouse_up = DispatchMouseEventParams::new(
-            DispatchMouseEventType::MouseReleased, x, y,
-        );
+        let mut mouse_up =
+            DispatchMouseEventParams::new(DispatchMouseEventType::MouseReleased, x, y);
         mouse_up.button = Some(MouseButton::Left);
         mouse_up.click_count = Some(1);
 
@@ -354,7 +527,7 @@ impl BrowserInstance {
             .map_err(|e| LynxError::Browser(format!("click mouseup failed: {e}")))?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-        Ok(format!("Clicked {ref_id} (clicked:{tag}:{text})"))
+        Ok(format!("Clicked {ref_id} ({tag}:{text})"))
     }
 
     pub async fn type_text(
@@ -369,7 +542,10 @@ impl BrowserInstance {
             .resolve(ref_id)
             .ok_or_else(|| LynxError::ElementNotFound(ref_id.to_string()))?;
 
-        let escaped_text = text.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
+        let escaped_text = text
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n");
         let clear_flag = if clear_first { "true" } else { "false" };
 
         // Find element by data-lynx-ref (stamped during snapshot), focus, type
@@ -453,11 +629,7 @@ impl BrowserInstance {
         Ok(format!("Typed into {ref_id} via {method}: {text}"))
     }
 
-    pub async fn press(
-        &mut self,
-        ref_id: &str,
-        key: &str,
-    ) -> Result<String, LynxError> {
+    pub async fn press(&mut self, ref_id: &str, key: &str) -> Result<String, LynxError> {
         self.check_alive()?;
         let _backend_id = *self
             .ref_map
@@ -521,9 +693,84 @@ impl BrowserInstance {
         }
     }
 
-    pub async fn upload_file(&self, _file_paths: &[String]) -> Result<String, LynxError> {
-        // TODO: implement CDP DOM.setFileInputFiles
-        Ok("File upload not yet implemented".to_string())
+    pub async fn upload_file(
+        &self,
+        ref_id: Option<&str>,
+        file_paths: &[String],
+    ) -> Result<String, LynxError> {
+        self.check_alive()?;
+
+        // Validate file paths exist locally
+        for path in file_paths {
+            if !std::path::Path::new(path).exists() {
+                return Err(LynxError::Browser(format!("File not found: {path}")));
+            }
+        }
+
+        // Find the file input element — by ref or first input[type=file]
+        let selector = if let Some(rid) = ref_id {
+            self.ref_map
+                .resolve(rid)
+                .ok_or_else(|| LynxError::ElementNotFound(rid.to_string()))?;
+            format!("[data-lynx-ref=\"{rid}\"]")
+        } else {
+            "input[type=file]".to_string()
+        };
+
+        // Get a RemoteObjectId for the file input via JS evaluation
+        use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+
+        let eval_js = format!(
+            r#"(function() {{
+                var el = document.querySelector('{selector}');
+                if (!el) return null;
+                if (el.tagName !== 'INPUT' || el.type !== 'file') {{
+                    var nested = el.querySelector('input[type=file]');
+                    if (nested) return nested;
+                    return null;
+                }}
+                return el;
+            }})()"#
+        );
+
+        let mut eval_params = EvaluateParams::new(eval_js);
+        eval_params.return_by_value = Some(false);
+
+        let eval_result = self
+            .page
+            .execute(eval_params)
+            .await
+            .map_err(|e| LynxError::Browser(format!("upload locate failed: {e}")))?;
+
+        let remote_object = &eval_result.result.result;
+        let object_id = remote_object
+            .object_id
+            .as_ref()
+            .ok_or_else(|| {
+                LynxError::ElementNotFound("No file input element found on page".to_string())
+            })?
+            .clone();
+
+        // Set files via CDP DOM.setFileInputFiles
+        let mut params = SetFileInputFilesParams::new(file_paths.to_vec());
+        params.object_id = Some(object_id);
+
+        self.page
+            .execute(params)
+            .await
+            .map_err(|e| LynxError::Browser(format!("setFileInputFiles failed: {e}")))?;
+
+        let file_names: Vec<&str> = file_paths
+            .iter()
+            .filter_map(|p| std::path::Path::new(p).file_name().and_then(|n| n.to_str()))
+            .collect();
+
+        Ok(format!(
+            "Uploaded {} file(s): {}",
+            file_paths.len(),
+            file_names.join(", ")
+        ))
     }
 
     pub async fn eval(&self, expression: &str) -> Result<String, LynxError> {
@@ -546,8 +793,7 @@ impl BrowserInstance {
             .into_value()
             .map_err(|e| LynxError::JsEval(format!("{e:?}")))?;
 
-        serde_json::to_string_pretty(&result)
-            .map_err(|e| LynxError::JsEval(e.to_string()))
+        serde_json::to_string_pretty(&result).map_err(|e| LynxError::JsEval(e.to_string()))
     }
 
     pub async fn dismiss_overlays(&self) -> Result<String, LynxError> {
@@ -621,7 +867,9 @@ impl BrowserInstance {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
 
-        Ok(format!("Timeout after {timeout_ms}ms (may still be loading)"))
+        Ok(format!(
+            "Timeout after {timeout_ms}ms (may still be loading)"
+        ))
     }
 
     pub async fn screenshot(&self, full_page: bool) -> Result<String, LynxError> {
@@ -654,6 +902,55 @@ impl BrowserInstance {
         Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
     }
 
+    /// Show a non-blocking intervention banner at the bottom of the page.
+    /// Fires a native macOS notification, then polls until the user clicks "Done" or timeout expires.
+    pub async fn request_intervention(
+        &self,
+        message: &str,
+        timeout_ms: u64,
+    ) -> Result<String, LynxError> {
+        self.check_alive()?;
+
+        // System notification + browser banner
+        self.show_system_notification(message);
+        self.inject_intervention_banner(message).await;
+
+        // Poll for dismiss
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+
+        while start.elapsed() < timeout {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            let dismissed: bool = self
+                .page
+                .evaluate("window.__lynx_intervention_dismissed === true")
+                .await
+                .map_err(|e| LynxError::Browser(format!("intervention poll failed: {e}")))?
+                .into_value()
+                .unwrap_or(false);
+
+            if dismissed {
+                return Ok(format!(
+                    "User completed intervention after {}ms",
+                    start.elapsed().as_millis()
+                ));
+            }
+        }
+
+        // Timeout — clean up banner
+        let _ = self
+            .page
+            .evaluate(
+                "(function(){ var b = document.getElementById('__lynx_intervention'); if (b) b.remove(); })()",
+            )
+            .await;
+
+        Ok(format!(
+            "Intervention timed out after {timeout_ms}ms (user did not click Done)"
+        ))
+    }
+
     pub async fn auth_login(
         &mut self,
         item: &str,
@@ -666,10 +963,12 @@ impl BrowserInstance {
         // Navigate to login page
         self.navigate(url, 3000).await?;
 
-        // TODO: implement iterative form fill using snapshot + ref resolution
-        // For now, return the credential fetch status
+        // Run iterative form fill
+        let fill_result = crate::auth::form_fill::fill_login_form(self, &creds).await?;
+
+        let current_url = self.current_url().await;
         Ok(format!(
-            "Auth: navigated to {url}, credentials loaded for '{}' (user: {})",
+            "Auth login for '{}' (user: {})\nURL: {current_url}\n{fill_result}",
             item, creds.username
         ))
     }

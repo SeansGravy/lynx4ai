@@ -1,20 +1,20 @@
 [package]
-name = "lynx4ai"
+name = "lynx-mcp"
 version = "0.1.0"
 edition = "2021"
 authors = ["Sean Gray <sean@rhmc.io>"]
 license = "MIT"
 description = "Rust MCP server for AI browser automation via Chrome DevTools Protocol"
-repository = "https://github.com/SeansGravy/lynx4ai"
+repository = "https://github.com/SeansGravy/lynx-mcp"
 keywords = ["mcp", "browser", "automation", "ai", "cdp"]
 categories = ["development-tools", "web-programming"]
 
 [[bin]]
-name = "lynx4ai"
+name = "lynx-mcp"
 path = "src/main.rs"
 
 [lib]
-name = "lynx4ai"
+name = "lynx_mcp"
 path = "src/lib.rs"
 
 [dependencies]

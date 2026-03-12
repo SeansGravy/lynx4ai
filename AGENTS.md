@@ -1,4 +1,4 @@
-# AGENTS.md — lynx4ai
+# AGENTS.md — lynx-mcp
 
 ## Overview
 Rust MCP server for Chrome browser automation via CDP (Chrome DevTools Protocol).
@@ -7,7 +7,7 @@ Reads the web through the accessibility tree instead of pixels — optimized for
 ## Build & Run
 ```bash
 cargo build --release
-# Binary at ./target/release/lynx4ai
+# Binary at ./target/release/lynx-mcp
 # Communicates via stdio (MCP JSON-RPC protocol)
 ```
 
@@ -37,10 +37,10 @@ cargo clippy -- -D warnings   # Lint
 |-----|---------|---------|
 | `LYNX_HEADLESS` | `true` | Headless or headed Chrome |
 | `LYNX_CHROME_PATH` | auto-detect | Chrome binary path |
-| `LYNX_PROFILE_DIR` | `~/.lynx4ai/profiles` | Persistent session storage |
+| `LYNX_PROFILE_DIR` | `~/.lynx-mcp/profiles` | Persistent session storage |
 | `LYNX_EVAL_ENABLED` | `true` | Enable/disable JS eval tool |
 | `LYNX_AUTH_PROVIDER` | `op` | Password manager CLI |
-| `RUST_LOG` | `lynx4ai=info` | Tracing filter |
+| `RUST_LOG` | `lynx_mcp=info` | Tracing filter |
 
 ## MCP Tools (16 total)
 - **Instance**: `instance_create`, `instance_list`, `instance_destroy`

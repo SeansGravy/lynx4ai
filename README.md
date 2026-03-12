@@ -1,4 +1,4 @@
-# lynx4ai
+# lynx-mcp
 
 Rust MCP server for AI browser automation via Chrome DevTools Protocol.
 
@@ -8,7 +8,7 @@ Reads the web through the accessibility tree instead of pixels — like the orig
 
 In 1992, [Lynx](https://en.wikipedia.org/wiki/Lynx_(web_browser)) proved you could browse the entire web with nothing but text in a terminal. No images, no CSS, no JavaScript rendering — just the content, fast and clean.
 
-lynx4ai carries that same philosophy forward for AI agents. Instead of rendering pixels and taking screenshots, it reads the web the way a screen reader does — through the accessibility tree. The result: structured, semantic page data at ~800 tokens instead of ~4,000 vision tokens for a screenshot.
+lynx-mcp carries that same philosophy forward for AI agents. Instead of rendering pixels and taking screenshots, it reads the web the way a screen reader does — through the accessibility tree. The result: structured, semantic page data at ~800 tokens instead of ~4,000 vision tokens for a screenshot.
 
 Same idea, different era. Text was enough then. Structure is enough now.
 
@@ -17,16 +17,16 @@ Same idea, different era. Text was enough then. Structure is enough now.
 - **Lynx (1992)** — The original text-mode browser. Proved the web is content, not rendering.
 - **Pinchtab (2025)** — Pioneered accessibility-tree snapshots with stable refs for AI agents.
 - **Sean's LLM browser hacks (2025-2026)** — Battle-tested patterns for modal dismissal, response stability detection, and resilient form automation across ChatGPT, Grok, and others.
-- **lynx4ai (2026)** — All of the above, in Rust, as an MCP server. One binary. No runtime deps.
+- **lynx-mcp (2026)** — All of the above, in Rust, as an MCP server. One binary. No runtime deps.
 
 ## Use Cases
 
 ### Cross-LLM Automation
 
-Use one AI to drive another through the browser. lynx4ai gives any MCP-capable agent full browser control — including navigating to other LLM web interfaces.
+Use one AI to drive another through the browser. lynx-mcp gives any MCP-capable agent full browser control — including navigating to other LLM web interfaces.
 
-- **Claude driving ChatGPT** — Use Claude Code with lynx4ai to navigate to chat.openai.com, type prompts, read responses, compare outputs
-- **Codex driving Claude** — Have OpenAI's Codex CLI use lynx4ai to interact with Claude's web UI
+- **Claude driving ChatGPT** — Use Claude Code with lynx-mcp to navigate to chat.openai.com, type prompts, read responses, compare outputs
+- **Codex driving Claude** — Have OpenAI's Codex CLI use lynx-mcp to interact with Claude's web UI
 - **Multi-model comparison** — Write a script that sends the same prompt to ChatGPT, Gemini, and Grok via their web UIs, then collects and compares all responses
 - **Best-of-N routing** — Agent navigates to multiple LLM interfaces, asks each the same question, picks the best answer
 - **LLM-as-judge via browser** — One model evaluates another model's web UI output by reading the accessibility tree
@@ -36,7 +36,7 @@ Use one AI to drive another through the browser. lynx4ai gives any MCP-capable a
 Persistent Chrome profiles mean you log in once and stay logged in. Combine with `auth_login` for fully automated credential entry.
 
 - **Medical portals** — Pull lab results, appointment history, medication lists from MyChart or similar
-- **Corporate intranets** — Navigate internal dashboards, HR systems, IT portals, wiki pages, ticketing systems (ServiceNow, Jira, Confluence) — anything your browser can reach, lynx4ai can read
+- **Corporate intranets** — Navigate internal dashboards, HR systems, IT portals, wiki pages, ticketing systems (ServiceNow, Jira, Confluence) — anything your browser can reach, lynx-mcp can read
 - **Banking & finance** — Check balances, download statements, monitor transactions
 - **Government portals** — Tax filings, benefits status, license renewals
 - **SaaS dashboards** — Pull data from admin panels, analytics dashboards, CRM systems
@@ -85,23 +85,23 @@ Persistent Chrome profiles mean you log in once and stay logged in. Combine with
 ### One-liner (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SeansGravy/lynx4ai/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/SeansGravy/lynx-mcp/main/install.sh | bash
 ```
 
 This will:
 - Detect your platform (macOS Intel/Apple Silicon, Linux x86_64/ARM)
 - Install Chrome if missing (via Homebrew on macOS, apt/dnf/pacman on Linux)
 - Install Rust if needed (via rustup)
-- Build from source and install to `~/.local/bin/lynx4ai`
+- Build from source and install to `~/.local/bin/lynx-mcp`
 - Print setup instructions for your AI tool
 
 ### From source (manual)
 
 ```bash
-git clone https://github.com/SeansGravy/lynx4ai.git
-cd lynx4ai
+git clone https://github.com/SeansGravy/lynx-mcp.git
+cd lynx-mcp
 make install
-# or: cargo build --release && cp target/release/lynx4ai ~/.local/bin/
+# or: cargo build --release && cp target/release/lynx-mcp ~/.local/bin/
 ```
 
 ### Requirements
@@ -112,12 +112,12 @@ make install
 
 ## Setup
 
-lynx4ai works with any AI tool that supports MCP (Model Context Protocol) over stdio. Here's how to set it up for each one.
+lynx-mcp works with any AI tool that supports MCP (Model Context Protocol) over stdio. Here's how to set it up for each one.
 
 ### Claude Code
 
 ```bash
-claude mcp add lynx4ai ~/.local/bin/lynx4ai
+claude mcp add lynx-mcp ~/.local/bin/lynx-mcp
 ```
 
 ### Claude Desktop
@@ -127,8 +127,8 @@ Add to `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "lynx4ai": {
-      "command": "~/.local/bin/lynx4ai"
+    "lynx-mcp": {
+      "command": "~/.local/bin/lynx-mcp"
     }
   }
 }
@@ -137,19 +137,19 @@ Add to `claude_desktop_config.json`:
 ### OpenAI Codex CLI
 
 ```bash
-codex mcp add lynx4ai -- ~/.local/bin/lynx4ai
+codex mcp add lynx-mcp -- ~/.local/bin/lynx-mcp
 ```
 
 Or add to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.lynx4ai]
-command = "~/.local/bin/lynx4ai"
+[mcp_servers.lynx-mcp]
+command = "~/.local/bin/lynx-mcp"
 ```
 
 ### ChatGPT Desktop
 
-ChatGPT Desktop only supports remote (HTTPS) MCP servers, not local stdio. To use lynx4ai with ChatGPT, you'd need to wrap it in an HTTP bridge like [mcp-proxy](https://github.com/nichochar/mcp-proxy) or [mcp.run](https://www.mcp.run).
+ChatGPT Desktop only supports remote (HTTPS) MCP servers, not local stdio. To use lynx-mcp with ChatGPT, you'd need to wrap it in an HTTP bridge like [mcp-proxy](https://github.com/nichochar/mcp-proxy) or [mcp.run](https://www.mcp.run).
 
 ### Cursor
 
@@ -158,8 +158,8 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
 ```json
 {
   "mcpServers": {
-    "lynx4ai": {
-      "command": "~/.local/bin/lynx4ai"
+    "lynx-mcp": {
+      "command": "~/.local/bin/lynx-mcp"
     }
   }
 }
@@ -172,8 +172,8 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 ```json
 {
   "mcpServers": {
-    "lynx4ai": {
-      "command": "~/.local/bin/lynx4ai"
+    "lynx-mcp": {
+      "command": "~/.local/bin/lynx-mcp"
     }
   }
 }
@@ -188,8 +188,8 @@ Add to `.vscode/mcp.json` in your project:
 ```json
 {
   "servers": {
-    "lynx4ai": {
-      "command": "~/.local/bin/lynx4ai"
+    "lynx-mcp": {
+      "command": "~/.local/bin/lynx-mcp"
     }
   }
 }
@@ -200,13 +200,13 @@ Add to `.vscode/mcp.json` in your project:
 Or via command line:
 
 ```bash
-code --add-mcp '{"name":"lynx4ai","command":"~/.local/bin/lynx4ai"}'
+code --add-mcp '{"name":"lynx-mcp","command":"~/.local/bin/lynx-mcp"}'
 ```
 
 ### Gemini CLI
 
 ```bash
-gemini mcp add lynx4ai ~/.local/bin/lynx4ai
+gemini mcp add lynx-mcp ~/.local/bin/lynx-mcp
 ```
 
 Or add to `~/.gemini/settings.json`:
@@ -214,8 +214,8 @@ Or add to `~/.gemini/settings.json`:
 ```json
 {
   "mcpServers": {
-    "lynx4ai": {
-      "command": "~/.local/bin/lynx4ai"
+    "lynx-mcp": {
+      "command": "~/.local/bin/lynx-mcp"
     }
   }
 }
@@ -226,7 +226,7 @@ Or add to `~/.gemini/settings.json`:
 The xAI API supports remote MCP servers only (HTTP/SSE). For local stdio, use the third-party [grok-cli](https://github.com/superagent-ai/grok-cli):
 
 ```bash
-grok mcp add lynx4ai --transport stdio --command ~/.local/bin/lynx4ai
+grok mcp add lynx-mcp --transport stdio --command ~/.local/bin/lynx-mcp
 ```
 
 Or add to `.grok/settings.json`:
@@ -234,9 +234,9 @@ Or add to `.grok/settings.json`:
 ```json
 {
   "mcpServers": {
-    "lynx4ai": {
+    "lynx-mcp": {
       "transport": "stdio",
-      "command": "~/.local/bin/lynx4ai"
+      "command": "~/.local/bin/lynx-mcp"
     }
   }
 }
@@ -245,7 +245,7 @@ Or add to `.grok/settings.json`:
 ### Amazon Q Developer
 
 ```bash
-q mcp add --name lynx4ai --command ~/.local/bin/lynx4ai
+q mcp add --name lynx-mcp --command ~/.local/bin/lynx-mcp
 ```
 
 Or add to `~/.aws/amazonq/mcp.json`:
@@ -253,8 +253,8 @@ Or add to `~/.aws/amazonq/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "lynx4ai": {
-      "command": "~/.local/bin/lynx4ai"
+    "lynx-mcp": {
+      "command": "~/.local/bin/lynx-mcp"
     }
   }
 }
@@ -267,8 +267,8 @@ Open the Cline sidebar in VS Code, click the MCP Servers icon, select "Configure
 ```json
 {
   "mcpServers": {
-    "lynx4ai": {
-      "command": "~/.local/bin/lynx4ai",
+    "lynx-mcp": {
+      "command": "~/.local/bin/lynx-mcp",
       "disabled": false
     }
   }
@@ -279,21 +279,21 @@ Open the Cline sidebar in VS Code, click the MCP Servers icon, select "Configure
 
 | Tool | Config | CLI Shortcut |
 |------|--------|-------------|
-| Claude Code | automatic | `claude mcp add lynx4ai ~/.local/bin/lynx4ai` |
+| Claude Code | automatic | `claude mcp add lynx-mcp ~/.local/bin/lynx-mcp` |
 | Claude Desktop | `claude_desktop_config.json` | — |
-| Codex CLI | `~/.codex/config.toml` | `codex mcp add lynx4ai -- ~/.local/bin/lynx4ai` |
+| Codex CLI | `~/.codex/config.toml` | `codex mcp add lynx-mcp -- ~/.local/bin/lynx-mcp` |
 | ChatGPT Desktop | HTTP only (needs bridge) | — |
 | Cursor | `~/.cursor/mcp.json` | — |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | — |
 | VS Code Copilot | `.vscode/mcp.json` | `code --add-mcp '{...}'` |
-| Gemini CLI | `~/.gemini/settings.json` | `gemini mcp add lynx4ai ~/.local/bin/lynx4ai` |
-| Grok (grok-cli) | `.grok/settings.json` | `grok mcp add lynx4ai --transport stdio ...` |
-| Amazon Q | `~/.aws/amazonq/mcp.json` | `q mcp add --name lynx4ai --command ...` |
+| Gemini CLI | `~/.gemini/settings.json` | `gemini mcp add lynx-mcp ~/.local/bin/lynx-mcp` |
+| Grok (grok-cli) | `.grok/settings.json` | `grok mcp add lynx-mcp --transport stdio ...` |
+| Amazon Q | `~/.aws/amazonq/mcp.json` | `q mcp add --name lynx-mcp --command ...` |
 | Cline | VS Code globalStorage | — |
 
 ## Usage
 
-Once lynx4ai is set up as an MCP server, just talk to your AI in plain English. The AI figures out which tools to call. Here are some things you can say:
+Once lynx-mcp is set up as an MCP server, just talk to your AI in plain English. The AI figures out which tools to call. Here are some things you can say:
 
 ### Basic browsing
 
@@ -419,10 +419,10 @@ You can also be explicit about which tools to use:
 |----------|---------|-------------|
 | `LYNX_HEADLESS` | `true` | Run Chrome in headless mode |
 | `LYNX_CHROME_PATH` | auto-detect | Path to Chrome binary |
-| `LYNX_PROFILE_DIR` | `~/.lynx4ai/profiles` | Persistent session storage |
+| `LYNX_PROFILE_DIR` | `~/.lynx-mcp/profiles` | Persistent session storage |
 | `LYNX_EVAL_ENABLED` | `true` | Enable/disable JavaScript eval tool |
 | `LYNX_AUTH_PROVIDER` | `op` | Password manager CLI (1Password) |
-| `RUST_LOG` | `lynx4ai=info` | Tracing filter |
+| `RUST_LOG` | `lynx_mcp=info` | Tracing filter |
 
 ## How It Works
 
@@ -457,7 +457,7 @@ cargo clippy
 
 # Release (optimized single binary)
 cargo build --release
-# Binary at ./target/release/lynx4ai
+# Binary at ./target/release/lynx-mcp
 ```
 
 ## License

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 pub struct LynxConfig {
     pub chrome_path: PathBuf,
     pub profile_dir: PathBuf,
+    #[allow(dead_code)]
     pub headless: bool,
 }
 
@@ -15,7 +16,7 @@ impl LynxConfig {
                 .unwrap_or_else(|_| detect_chrome()),
             profile_dir: std::env::var("LYNX_PROFILE_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| home.join(".lynx4ai").join("profiles")),
+                .unwrap_or_else(|_| home.join(".lynx-mcp").join("profiles")),
             headless: std::env::var("LYNX_HEADLESS")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),

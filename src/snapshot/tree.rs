@@ -4,38 +4,18 @@ use crate::browser::instance::RefMap;
 use crate::error::LynxError;
 use crate::types::SnapshotNode;
 
-/// Interactive accessibility roles
-const INTERACTIVE_ROLES: &[&str] = &[
-    "button",
-    "link",
-    "textbox",
-    "checkbox",
-    "radio",
-    "combobox",
-    "listbox",
-    "menuitem",
-    "menuitemcheckbox",
-    "menuitemradio",
-    "option",
-    "searchbox",
-    "slider",
-    "spinbutton",
-    "switch",
-    "tab",
-    "treeitem",
-];
-
-#[allow(dead_code)]
-fn is_interactive(role: &str) -> bool {
-    INTERACTIVE_ROLES.contains(&role.to_lowercase().as_str())
-}
-
 /// JavaScript that walks the DOM and extracts accessibility info.
 /// Uses computedRole/computedName (Chrome 90+) with aria-* fallbacks.
 /// Stamps each matched element with data-lynx-ref="eN" for click/type resolution.
-/// Returns JSON array including the ref index so Rust uses the SAME indices.
-const JS_SNAPSHOT: &str = r#"
-(function() {
+///
+/// Refs are **persistent and monotonic**: once an element is stamped with eN, it keeps
+/// that ref across subsequent snapshots. New elements get the next available ref from
+/// `window.__lynx_next_ref`. Removed elements naturally lose their stamp.
+///
+/// The `__LYNX_SELECTOR__` placeholder is replaced by Rust with a CSS selector string
+/// or `null` to scope the snapshot to a subtree.
+const JS_SNAPSHOT_TEMPLATE: &str = r#"
+(function(rootSelector) {
     const INTERACTIVE_TAGS = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','DETAILS','SUMMARY']);
     const INTERACTIVE_ROLES = new Set([
         'button','link','textbox','checkbox','radio','combobox','listbox',
@@ -95,14 +75,17 @@ const JS_SNAPSHOT: &str = r#"
         return text.trim().substring(0, 100);
     }
 
-    // Clean up any previous ref tags
-    document.querySelectorAll('[data-lynx-ref]').forEach(function(e) {
-        e.removeAttribute('data-lynx-ref');
-    });
+    // Persistent monotonic counter — never resets across snapshots
+    if (typeof window.__lynx_next_ref === 'undefined') {
+        window.__lynx_next_ref = 0;
+    }
+
+    // Scope to selector subtree or full body
+    var root = rootSelector ? document.querySelector(rootSelector) : document.body;
+    if (!root) root = document.body;
 
     var nodes = [];
-    var refIdx = 0;
-    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
     var el = walker.currentNode;
     while (el) {
         if (!SKIP_TAGS.has(el.tagName)) {
@@ -112,16 +95,24 @@ const JS_SNAPSHOT: &str = r#"
                 var interactive = INTERACTIVE_TAGS.has(el.tagName) || INTERACTIVE_ROLES.has(role);
                 var value = el.value !== undefined && el.value !== '' ? String(el.value) : undefined;
                 var desc = el.getAttribute('aria-description') || undefined;
-                // Stamp the DOM element so click/type_text can find it by ref
-                el.setAttribute('data-lynx-ref', 'e' + refIdx);
+
+                // Persistent ref: keep existing stamp, only assign new refs to unstamped elements
+                var existingRef = el.getAttribute('data-lynx-ref');
+                var refIdx;
+                if (existingRef) {
+                    refIdx = parseInt(existingRef.substring(1), 10);
+                } else {
+                    refIdx = window.__lynx_next_ref++;
+                    el.setAttribute('data-lynx-ref', 'e' + refIdx);
+                }
+
                 nodes.push({ role: role, name: name, interactive: interactive, value: value, desc: desc, tag: el.tagName, r: refIdx });
-                refIdx++;
             }
         }
         el = walker.nextNode();
     }
-    return JSON.stringify(nodes);
-})()
+    return JSON.stringify({ nodes: nodes, nextRef: window.__lynx_next_ref });
+})(__LYNX_SELECTOR__)
 "#;
 
 /// Build a snapshot of the page's accessibility tree.
@@ -129,27 +120,39 @@ const JS_SNAPSHOT: &str = r#"
 /// The JS walk is the sole source of truth for ref numbering — this guarantees
 /// snapshot refs match the DOM stamps that click/type_text/press use via querySelector.
 ///
+/// Refs are persistent: elements keep their ref across snapshots. New elements get
+/// monotonically increasing refs. Returns (nodes, ref_map, snapshot_version).
+///
 /// Previous architecture used CDP getFullAXTree as primary path, but the AX tree
 /// traversal order differs from DOM document order, causing ref index mismatches
 /// when JS_TAG_ELEMENTS stamped elements in DOM order. Eliminated entirely.
 pub async fn build_snapshot(
     page: &Page,
     interactive_only: bool,
-) -> Result<(Vec<SnapshotNode>, RefMap), LynxError> {
+    selector: Option<&str>,
+) -> Result<(Vec<SnapshotNode>, RefMap, u64), LynxError> {
+    // Inject the selector into the JS template
+    let js = if let Some(sel) = selector {
+        let escaped = sel.replace('\\', "\\\\").replace('\'', "\\'");
+        JS_SNAPSHOT_TEMPLATE.replace("__LYNX_SELECTOR__", &format!("'{escaped}'"))
+    } else {
+        JS_SNAPSHOT_TEMPLATE.replace("__LYNX_SELECTOR__", "null")
+    };
+
     let json_str: String = page
-        .evaluate(JS_SNAPSHOT)
+        .evaluate(js)
         .await
         .map_err(|e| LynxError::Snapshot(format!("JS snapshot failed: {e}")))?
         .into_value()
         .map_err(|e| LynxError::Snapshot(format!("JS snapshot parse failed: {e:?}")))?;
 
-    let raw_nodes: Vec<JsNode> = serde_json::from_str(&json_str)
+    let result: JsSnapshotResult = serde_json::from_str(&json_str)
         .map_err(|e| LynxError::Snapshot(format!("JS snapshot JSON parse failed: {e}")))?;
 
     let mut ref_map = RefMap::new();
     let mut snapshot_nodes = Vec::new();
 
-    for node in raw_nodes {
+    for node in result.nodes {
         let interactive = node.interactive;
 
         if interactive_only && !interactive {
@@ -174,7 +177,14 @@ pub async fn build_snapshot(
         });
     }
 
-    Ok((snapshot_nodes, ref_map))
+    Ok((snapshot_nodes, ref_map, result.next_ref))
+}
+
+#[derive(serde::Deserialize)]
+struct JsSnapshotResult {
+    nodes: Vec<JsNode>,
+    #[serde(rename = "nextRef")]
+    next_ref: u64,
 }
 
 #[derive(serde::Deserialize)]

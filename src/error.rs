@@ -26,17 +26,11 @@ pub enum LynxError {
     #[error("Auth provider error: {0}")]
     AuthProvider(String),
 
-    #[error("Auth failed: {0}")]
-    Auth(String),
-
     #[error("Screenshot failed: {0}")]
     Screenshot(String),
 
     #[error("PDF export failed: {0}")]
     Pdf(String),
-
-    #[error("Chrome not found at {0}")]
-    ChromeNotFound(String),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
