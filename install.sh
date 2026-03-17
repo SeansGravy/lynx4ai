@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# lynx4ai installer for macOS / Linux
-# Usage: curl -fsSL https://raw.githubusercontent.com/SeansGravy/lynx4ai/main/install.sh | bash
+# lynx-mcp installer for macOS / Linux
+# Usage: curl -fsSL https://raw.githubusercontent.com/SeansGravy/lynx-mcp/main/install.sh | bash
 set -euo pipefail
 
-REPO="SeansGravy/lynx4ai"
-BINARY="lynx4ai"
+REPO="SeansGravy/lynx-mcp"
+BINARY="lynx-mcp"
 INSTALL_DIR="${LYNX_INSTALL_DIR:-$HOME/.local/bin}"
 
 # --- Colors ---
@@ -16,10 +16,10 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-info()  { echo -e "${CYAN}[lynx4ai]${NC} $*"; }
-ok()    { echo -e "${GREEN}[lynx4ai]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[lynx4ai]${NC} $*"; }
-fail()  { echo -e "${RED}[lynx4ai]${NC} $*"; exit 1; }
+info()  { echo -e "${CYAN}[lynx-mcp]${NC} $*"; }
+ok()    { echo -e "${GREEN}[lynx-mcp]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[lynx-mcp]${NC} $*"; }
+fail()  { echo -e "${RED}[lynx-mcp]${NC} $*"; exit 1; }
 
 # --- Banner ---
 echo ""
@@ -160,7 +160,7 @@ else
         ok "Chrome installed: $CHROME_VERSION"
     else
         warn "Chrome not detected after install attempt."
-        warn "lynx4ai requires Chrome or Chromium at runtime."
+        warn "lynx-mcp requires Chrome or Chromium at runtime."
     fi
 fi
 
@@ -168,7 +168,7 @@ fi
 # (only needed if building from source — checked below)
 
 # ============================================================
-# Install lynx4ai
+# Install lynx-mcp
 # ============================================================
 
 # Try to find a pre-built release first
@@ -217,10 +217,10 @@ if [ "$BUILD_FROM_SOURCE" = true ]; then
     trap 'rm -rf "$TMPDIR"' EXIT
 
     info "Cloning $REPO..."
-    git clone --depth 1 "https://github.com/$REPO.git" "$TMPDIR/lynx4ai" 2>/dev/null
+    git clone --depth 1 "https://github.com/$REPO.git" "$TMPDIR/lynx-mcp" 2>/dev/null
 
     info "Building release binary (this may take a minute)..."
-    cd "$TMPDIR/lynx4ai"
+    cd "$TMPDIR/lynx-mcp"
     cargo build --release 2>&1 | tail -1
 
     cp "target/release/$BINARY" "$INSTALL_DIR/$BINARY"
@@ -272,15 +272,15 @@ echo -e "${BOLD}Setup for your AI tool:${NC}"
 echo ""
 echo -e "  ${CYAN}Claude Code${NC} — run this command:"
 echo ""
-echo -e "    claude mcp add lynx4ai $INSTALLED_PATH"
+echo -e "    claude mcp add lynx-mcp $INSTALLED_PATH"
 echo ""
 echo -e "  ${CYAN}Claude Desktop${NC} — add to claude_desktop_config.json:"
 echo ""
-echo -e '    "lynx4ai": { "command": "'$INSTALLED_PATH'" }'
+echo -e '    "lynx-mcp": { "command": "'$INSTALLED_PATH'" }'
 echo ""
 echo -e "  ${CYAN}Cursor / Windsurf / Codex${NC} — add to .mcp.json:"
 echo ""
-echo -e '    { "mcpServers": { "lynx4ai": { "command": "'$INSTALLED_PATH'" } } }'
+echo -e '    { "mcpServers": { "lynx-mcp": { "command": "'$INSTALLED_PATH'" } } }'
 echo ""
 
 # --- Optional deps ---
@@ -299,7 +299,7 @@ fi
 
 # --- Summary ---
 echo -e "${BOLD}Installed:${NC}"
-echo -e "  ${GREEN}lynx4ai${NC}  $INSTALLED_PATH ($SIZE)"
+echo -e "  ${GREEN}lynx-mcp${NC}  $INSTALLED_PATH ($SIZE)"
 [ "$CHROME_FOUND" = true ] && echo -e "  ${GREEN}chrome${NC}   $CHROME_VERSION"
 echo -e "  ${GREEN}git${NC}      $(git --version 2>/dev/null)"
 command -v cargo &>/dev/null && echo -e "  ${GREEN}rust${NC}     $(rustc --version 2>/dev/null)"

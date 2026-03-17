@@ -1,7 +1,7 @@
 .PHONY: build release install uninstall test test-integration lint check clean
 
 INSTALL_DIR ?= $(HOME)/.local/bin
-BINARY = lynx4ai
+BINARY = lynx-mcp
 
 build:
 	cargo build
@@ -15,7 +15,7 @@ install: release
 	chmod +x $(INSTALL_DIR)/$(BINARY)
 	@echo "Installed: $(INSTALL_DIR)/$(BINARY)"
 	@echo ""
-	@echo "Add to Claude Code:  claude mcp add lynx4ai $(INSTALL_DIR)/$(BINARY)"
+	@echo "Add to Claude Code:  claude mcp add lynx-mcp $(INSTALL_DIR)/$(BINARY)"
 
 uninstall:
 	rm -f $(INSTALL_DIR)/$(BINARY)

@@ -40,6 +40,8 @@ pub struct SnapshotResult {
     pub diff_summary: Option<String>,
     pub total_refs: usize,
     pub interactive_refs: usize,
+    /// Monotonic snapshot version — increases each snapshot. Refs are stable across versions.
+    pub snapshot_version: u64,
 }
 
 /// Instance metadata for list_instances

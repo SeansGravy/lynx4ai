@@ -1,11 +1,11 @@
 {
   "mcpServers": {
-    "lynx4ai": {
-      "command": "./target/release/lynx4ai",
+    "lynx-mcp": {
+      "command": "./target/release/lynx-mcp",
       "args": [],
       "env": {
         "LYNX_HEADLESS": "true",
-        "RUST_LOG": "lynx4ai=info"
+        "RUST_LOG": "lynx_mcp=info"
       }
     }
   }

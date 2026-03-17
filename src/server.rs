@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
-use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -18,6 +18,8 @@ pub struct InstanceCreateParams {
     pub profile: Option<String>,
     /// Run in headless mode (default: true). Set false for visible Chrome.
     pub headless: Option<bool>,
+    /// Block all image loading for faster page loads (default: false).
+    pub block_images: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -32,8 +34,6 @@ pub struct NavigateParams {
     pub url: String,
     /// Instance ID (uses default if omitted)
     pub instance_id: Option<String>,
-    /// Block image loading for speed
-    pub block_images: Option<bool>,
     /// Extra wait in ms after navigation (default: 2000)
     pub wait_ms: Option<u64>,
 }
@@ -94,6 +94,8 @@ pub struct PressParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct UploadFileParams {
+    /// Element ref for file input (e.g., "e5"). If omitted, finds first input[type=file].
+    pub ref_id: Option<String>,
     /// Local file path(s), comma-separated for multiple
     pub file_paths: String,
     /// Instance ID (uses default if omitted)
@@ -128,6 +130,16 @@ pub struct ScreenshotParams {
     pub instance_id: Option<String>,
     /// Capture full scrollable page
     pub full_page: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RequestInterventionParams {
+    /// Message explaining what the user needs to do (e.g., "Please sign in manually")
+    pub message: String,
+    /// Instance ID (uses default if omitted)
+    pub instance_id: Option<String>,
+    /// Timeout in ms waiting for user to click Done (default: 120000 = 2 min)
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -167,18 +179,25 @@ impl LynxServer {
 
 #[tool_router(router = tool_router)]
 impl LynxServer {
-    #[tool(description = "Create a new browser instance with persistent Chrome profile. Returns instance ID.")]
+    #[tool(
+        description = "Create a new browser instance with persistent Chrome profile. Returns instance ID."
+    )]
     async fn instance_create(&self, Parameters(p): Parameters<InstanceCreateParams>) -> String {
         let profile = p.profile.unwrap_or_else(|| "default".to_string());
         let headless = p.headless.unwrap_or(true);
+        let block_images = p.block_images.unwrap_or(false);
         let mut mgr = self.manager.write().await;
-        match mgr.create_instance(&profile, headless).await {
-            Ok(id) => format!("Instance created: {id}\nProfile: {profile}\nHeadless: {headless}"),
+        match mgr.create_instance(&profile, headless, block_images).await {
+            Ok(id) => format!(
+                "Instance created: {id}\nProfile: {profile}\nHeadless: {headless}\nBlock images: {block_images}"
+            ),
             Err(e) => format!("Error: {e}"),
         }
     }
 
-    #[tool(description = "List all running browser instances with their IDs, profiles, and current URLs.")]
+    #[tool(
+        description = "List all running browser instances with their IDs, profiles, and current URLs."
+    )]
     async fn instance_list(&self) -> String {
         let mgr = self.manager.read().await;
         let instances = mgr.list_instances();
@@ -197,19 +216,36 @@ impl LynxServer {
         }
     }
 
-    #[tool(description = "Navigate to a URL. Waits for page load + accessibility tree. Returns page title and URL.")]
+    #[tool(
+        description = "Navigate to a URL. Waits for page load + accessibility tree. Returns page title and URL."
+    )]
     async fn navigate(&self, Parameters(p): Parameters<NavigateParams>) -> String {
         let mut mgr = self.manager.write().await;
-        match mgr.navigate(&p.instance_id, &p.url, p.block_images.unwrap_or(false), p.wait_ms.unwrap_or(2000)).await {
+        match mgr
+            .navigate(&p.instance_id, &p.url, p.wait_ms.unwrap_or(2000))
+            .await
+        {
             Ok(info) => info,
             Err(e) => format!("Error: {e}"),
         }
     }
 
-    #[tool(description = "Get accessibility tree snapshot with stable element refs (e0, e1, e2...). Use filter='interactive' for only clickable/typeable elements. Use diff=true for changes since last snapshot. Use format='compact' for fewer tokens.")]
+    #[tool(
+        description = "Get accessibility tree snapshot with stable element refs (e0, e1, e2...). Use filter='interactive' for only clickable/typeable elements. Use diff=true for changes since last snapshot. Use format='compact' for fewer tokens."
+    )]
     async fn snapshot(&self, Parameters(p): Parameters<SnapshotParams>) -> String {
         let mut mgr = self.manager.write().await;
-        match mgr.snapshot(&p.instance_id, p.filter.as_deref(), p.diff.unwrap_or(false), p.format.as_deref().unwrap_or("full"), p.selector.as_deref(), p.max_tokens.map(|v| v as usize)).await {
+        match mgr
+            .snapshot(
+                &p.instance_id,
+                p.filter.as_deref(),
+                p.diff.unwrap_or(false),
+                p.format.as_deref().unwrap_or("full"),
+                p.selector.as_deref(),
+                p.max_tokens.map(|v| v as usize),
+            )
+            .await
+        {
             Ok(result) => result,
             Err(e) => format!("Error: {e}"),
         }
@@ -218,13 +254,18 @@ impl LynxServer {
     #[tool(description = "Extract readable text from the page (~800 tokens by default).")]
     async fn text(&self, Parameters(p): Parameters<TextParams>) -> String {
         let mut mgr = self.manager.write().await;
-        match mgr.text(&p.instance_id, p.max_tokens.unwrap_or(800) as usize).await {
+        match mgr
+            .text(&p.instance_id, p.max_tokens.unwrap_or(800) as usize)
+            .await
+        {
             Ok(text) => text,
             Err(e) => format!("Error: {e}"),
         }
     }
 
-    #[tool(description = "Click an element by its ref ID from snapshot (e.g., 'e5'). Auto-dismisses overlays and retries.")]
+    #[tool(
+        description = "Click an element by its ref ID from snapshot (e.g., 'e5'). If obscured, dismisses overlays and retries once."
+    )]
     async fn click(&self, Parameters(p): Parameters<ClickParams>) -> String {
         let mut mgr = self.manager.write().await;
         match mgr.click(&p.instance_id, &p.ref_id).await {
@@ -236,13 +277,23 @@ impl LynxServer {
     #[tool(description = "Type text into an element by its ref ID.")]
     async fn type_text(&self, Parameters(p): Parameters<TypeTextParams>) -> String {
         let mut mgr = self.manager.write().await;
-        match mgr.type_text(&p.instance_id, &p.ref_id, &p.text, p.clear_first.unwrap_or(false)).await {
+        match mgr
+            .type_text(
+                &p.instance_id,
+                &p.ref_id,
+                &p.text,
+                p.clear_first.unwrap_or(false),
+            )
+            .await
+        {
             Ok(msg) => msg,
             Err(e) => format!("Error: {e}"),
         }
     }
 
-    #[tool(description = "Press a keyboard key on an element (Enter, Tab, Escape, ArrowDown, etc.).")]
+    #[tool(
+        description = "Press a keyboard key on an element (Enter, Tab, Escape, ArrowDown, etc.)."
+    )]
     async fn press(&self, Parameters(p): Parameters<PressParams>) -> String {
         let mut mgr = self.manager.write().await;
         match mgr.press(&p.instance_id, &p.ref_id, &p.key).await {
@@ -251,11 +302,20 @@ impl LynxServer {
         }
     }
 
-    #[tool(description = "Upload file(s) via a file input element on the page. Comma-separate multiple paths.")]
+    #[tool(
+        description = "Upload file(s) via a file input element on the page. Comma-separate multiple paths."
+    )]
     async fn upload_file(&self, Parameters(p): Parameters<UploadFileParams>) -> String {
-        let paths: Vec<String> = p.file_paths.split(',').map(|s| s.trim().to_string()).collect();
+        let paths: Vec<String> = p
+            .file_paths
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
         let mut mgr = self.manager.write().await;
-        match mgr.upload_file(&p.instance_id, &paths).await {
+        match mgr
+            .upload_file(&p.instance_id, p.ref_id.as_deref(), &paths)
+            .await
+        {
             Ok(msg) => msg,
             Err(e) => format!("Error: {e}"),
         }
@@ -279,10 +339,15 @@ impl LynxServer {
         }
     }
 
-    #[tool(description = "Wait until page content stabilizes (text stops changing, no loading spinners).")]
+    #[tool(
+        description = "Wait until page content stabilizes (text stops changing, no loading spinners)."
+    )]
     async fn wait_for_stable(&self, Parameters(p): Parameters<WaitForStableParams>) -> String {
         let mut mgr = self.manager.write().await;
-        match mgr.wait_for_stable(&p.instance_id, p.timeout_ms.unwrap_or(10000)).await {
+        match mgr
+            .wait_for_stable(&p.instance_id, p.timeout_ms.unwrap_or(10000))
+            .await
+        {
             Ok(msg) => msg,
             Err(e) => format!("Error: {e}"),
         }
@@ -291,7 +356,10 @@ impl LynxServer {
     #[tool(description = "Take a page screenshot. Returns base64-encoded PNG.")]
     async fn screenshot(&self, Parameters(p): Parameters<ScreenshotParams>) -> String {
         let mut mgr = self.manager.write().await;
-        match mgr.screenshot(&p.instance_id, p.full_page.unwrap_or(false)).await {
+        match mgr
+            .screenshot(&p.instance_id, p.full_page.unwrap_or(false))
+            .await
+        {
             Ok(b64) => format!("data:image/png;base64,{b64}"),
             Err(e) => format!("Error: {e}"),
         }
@@ -306,10 +374,32 @@ impl LynxServer {
         }
     }
 
-    #[tool(description = "Log into a website using credentials from a password manager (1Password by default). Handles multi-page login flows with username, password, and optional TOTP.")]
+    #[tool(
+        description = "Log into a website using credentials from a password manager (1Password by default). Handles multi-page login flows with username, password, and optional TOTP."
+    )]
     async fn auth_login(&self, Parameters(p): Parameters<AuthLoginParams>) -> String {
         let mut mgr = self.manager.write().await;
-        match mgr.auth_login(&p.instance_id, &p.item, &p.url, p.vault.as_deref()).await {
+        match mgr
+            .auth_login(&p.instance_id, &p.item, &p.url, p.vault.as_deref())
+            .await
+        {
+            Ok(msg) => msg,
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Show a non-blocking banner in the browser asking the user to intervene (e.g., solve a CAPTCHA, log in manually). The page remains fully interactive. Waits for the user to click 'Done' or times out."
+    )]
+    async fn request_intervention(
+        &self,
+        Parameters(p): Parameters<RequestInterventionParams>,
+    ) -> String {
+        let mut mgr = self.manager.write().await;
+        match mgr
+            .request_intervention(&p.instance_id, &p.message, p.timeout_ms.unwrap_or(120_000))
+            .await
+        {
             Ok(msg) => msg,
             Err(e) => format!("Error: {e}"),
         }
@@ -319,16 +409,11 @@ impl LynxServer {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for LynxServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "lynx4ai: AI browser automation via Chrome accessibility tree. \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "lynx-mcp: AI browser automation via Chrome accessibility tree. \
                  Create a browser instance, navigate to pages, snapshot the accessibility tree \
                  with stable element refs, interact via click/type/press, and authenticate \
-                 via password manager. Inspired by the original Lynx text browser (1992)."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+                 via password manager. Inspired by the original Lynx text browser (1992).",
+        )
     }
 }
